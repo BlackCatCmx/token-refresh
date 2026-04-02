@@ -236,7 +236,6 @@ pub struct LoadedConfig {
     pub config_path: PathBuf,
     pub locked_fields: BTreeSet<String>,
     pub web_password: String,
-    pub web_session_secret: String,
 }
 
 #[derive(Clone, Debug)]
@@ -257,11 +256,6 @@ impl ConfigManager {
         if web_password.is_empty() {
             bail!("WEB_PASSWORD is required");
         }
-        let web_session_secret = env::var("WEB_SESSION_SECRET")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| web_password.clone());
         Ok(Self {
             inner: Arc::new(RwLock::new(LoadedConfig {
                 persisted_config,
@@ -269,7 +263,6 @@ impl ConfigManager {
                 config_path,
                 locked_fields,
                 web_password,
-                web_session_secret,
             })),
         })
     }
@@ -293,10 +286,6 @@ impl ConfigManager {
 
     pub async fn web_password(&self) -> String {
         self.inner.read().await.web_password.clone()
-    }
-
-    pub async fn web_session_secret(&self) -> String {
-        self.inner.read().await.web_session_secret.clone()
     }
 
     pub async fn header_preview(&self) -> BTreeMap<String, String> {
@@ -404,11 +393,14 @@ pub fn parse_byte_size_str(value: &str) -> Result<u64> {
 }
 
 fn resolve_config_path(paths: ConfigPaths) -> PathBuf {
-    env::var("CONFIG_PATH")
-        .ok()
-        .map(PathBuf::from)
-        .or(paths.cli_config_path)
-        .unwrap_or_else(|| PathBuf::from("./config.yaml"))
+    if let Some(path) = paths.cli_config_path {
+        return path;
+    }
+    let legacy = PathBuf::from("./config.yaml");
+    if legacy.exists() {
+        return legacy;
+    }
+    default_config_path()
 }
 
 fn load_config_file(path: &PathBuf) -> Result<AppConfig> {
@@ -422,108 +414,18 @@ fn load_config_file(path: &PathBuf) -> Result<AppConfig> {
 
 fn apply_env_overrides(mut config: AppConfig) -> Result<(AppConfig, BTreeSet<String>)> {
     let mut locked = BTreeSet::new();
-    apply_env_path(
-        &mut config.credentials_dir,
-        "CREDENTIALS_DIR",
-        "credentials_dir",
-        &mut locked,
-    );
-    apply_env_path(
-        &mut config.abnormal_credentials_dir,
-        "ABNORMAL_CREDENTIALS_DIR",
-        "abnormal_credentials_dir",
-        &mut locked,
-    );
-    apply_env_path(&mut config.state_dir, "STATE_DIR", "state_dir", &mut locked);
-    apply_env_string(&mut config.log_level, "LOG_LEVEL", "log_level", &mut locked);
-    apply_env_string(
-        &mut config.logging.max_file_size,
-        "LOGGING_MAX_FILE_SIZE",
-        "logging.max_file_size",
-        &mut locked,
-    );
-    apply_env_string(
-        &mut config.request_identity.originator,
-        "REQUEST_IDENTITY_ORIGINATOR",
-        "request_identity.originator",
-        &mut locked,
-    );
-    apply_env_string(
-        &mut config.request_identity.user_agent,
-        "REQUEST_IDENTITY_USER_AGENT",
-        "request_identity.user_agent",
-        &mut locked,
-    );
-    apply_env_u32(
-        &mut config.credential_management.abnormal_threshold,
-        "CREDENTIAL_ABNORMAL_THRESHOLD",
-        "credential_management.abnormal_threshold",
-        &mut locked,
-    )?;
-    apply_env_string(
-        &mut config.proxy.mode,
-        "PROXY_MODE",
-        "proxy.mode",
-        &mut locked,
-    );
-    apply_env_string(
-        &mut config.proxy.list,
-        "PROXY_LIST",
-        "proxy.list",
-        &mut locked,
-    );
-    apply_env_listen(&mut config.web.listen, &mut locked);
-    Ok((config, locked))
-}
-
-fn apply_env_string(
-    target: &mut String,
-    env_key: &str,
-    field: &str,
-    locked: &mut BTreeSet<String>,
-) {
-    if let Ok(value) = env::var(env_key) {
-        *target = value;
-        locked.insert(field.to_string());
-    }
-}
-
-fn apply_env_path(target: &mut PathBuf, env_key: &str, field: &str, locked: &mut BTreeSet<String>) {
-    if let Ok(value) = env::var(env_key) {
-        *target = PathBuf::from(value);
-        locked.insert(field.to_string());
-    }
-}
-
-fn apply_env_u32(
-    target: &mut u32,
-    env_key: &str,
-    field: &str,
-    locked: &mut BTreeSet<String>,
-) -> Result<()> {
-    if let Ok(value) = env::var(env_key) {
-        *target = value
-            .trim()
-            .parse::<u32>()
-            .with_context(|| format!("invalid {env_key} value"))?;
-        locked.insert(field.to_string());
-    }
-    Ok(())
-}
-
-fn apply_env_listen(target: &mut String, locked: &mut BTreeSet<String>) {
-    if let Ok(value) = env::var("WEB_LISTEN") {
-        *target = value;
-        locked.insert("web.listen".to_string());
-        return;
+    if let Ok(value) = env::var("LOG_LEVEL") {
+        config.log_level = value;
+        locked.insert("log_level".to_string());
     }
     if let Ok(port) = env::var("PORT") {
         let trimmed = port.trim();
         if !trimmed.is_empty() {
-            *target = format!("0.0.0.0:{trimmed}");
+            config.web.listen = format!("0.0.0.0:{trimmed}");
             locked.insert("web.listen".to_string());
         }
     }
+    Ok((config, locked))
 }
 
 fn reject_locked_field_updates(
@@ -615,15 +517,15 @@ fn validate_proxy_mode(value: &str) -> Result<()> {
 }
 
 fn default_credentials_dir() -> PathBuf {
-    PathBuf::from("./credentials")
+    storage_path("./credentials", &["credentials"])
 }
 
 fn default_abnormal_credentials_dir() -> PathBuf {
-    PathBuf::from("./credentials_abnormal")
+    storage_path("./credentials_abnormal", &["credentials_abnormal"])
 }
 
 fn default_state_dir() -> PathBuf {
-    PathBuf::from("./state")
+    storage_path("./state", &["state"])
 }
 
 fn default_log_level() -> String {
@@ -684,4 +586,51 @@ fn default_web_enabled() -> bool {
 
 fn default_web_listen() -> String {
     "0.0.0.0:9876".to_string()
+}
+
+fn default_config_path() -> PathBuf {
+    storage_path("./state/config.yaml", &["state", "config.yaml"])
+}
+
+fn storage_path(local: &str, data_segments: &[&str]) -> PathBuf {
+    storage_path_with_root(preferred_data_root(), local, data_segments)
+}
+
+fn storage_path_with_root(root: Option<PathBuf>, local: &str, data_segments: &[&str]) -> PathBuf {
+    match root {
+        Some(path) => data_segments
+            .iter()
+            .fold(path, |current, segment| current.join(segment)),
+        None => PathBuf::from(local),
+    }
+}
+
+fn preferred_data_root() -> Option<PathBuf> {
+    let root = PathBuf::from("/data");
+    root.is_dir().then_some(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_path_uses_data_root_when_available() {
+        let resolved = storage_path_with_root(
+            Some(PathBuf::from("/data")),
+            "./state/config.yaml",
+            &["state", "config.yaml"],
+        );
+        assert_eq!(
+            resolved,
+            PathBuf::from("/data").join("state").join("config.yaml")
+        );
+    }
+
+    #[test]
+    fn storage_path_falls_back_to_local_relative_path() {
+        let resolved =
+            storage_path_with_root(None, "./state/config.yaml", &["state", "config.yaml"]);
+        assert_eq!(resolved, PathBuf::from("./state/config.yaml"));
+    }
 }

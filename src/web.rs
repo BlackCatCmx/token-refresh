@@ -38,9 +38,9 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub fn new(password: &str, session_secret: &str) -> Result<Self> {
+    pub fn new(password: &str) -> Result<Self> {
         let mut mac =
-            HmacSha256::new_from_slice(session_secret.as_bytes()).context("invalid HMAC key")?;
+            HmacSha256::new_from_slice(password.as_bytes()).context("invalid HMAC key")?;
         mac.update(password.as_bytes());
         let expected_value = hex_encode(&mac.finalize().into_bytes());
         Ok(Self {
@@ -112,10 +112,7 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         logger.clone(),
     ));
     let scheduler = SchedulerHandle::new();
-    let session_manager = SessionManager::new(
-        &config_manager.web_password().await,
-        &config_manager.web_session_secret().await,
-    )?;
+    let session_manager = SessionManager::new(&config_manager.web_password().await)?;
 
     if !config.web.enabled {
         scheduler.spawn_background(config_manager.clone(), store, transaction, logger);

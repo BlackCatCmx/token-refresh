@@ -282,7 +282,6 @@ V1 管理页面至少提供以下能力：
 
 - 用户手动退出登录。
 - `WEB_PASSWORD` 发生变化。
-- `WEB_SESSION_SECRET` 发生变化。
 
 ## 8. 一次刷新事务与崩溃恢复
 
@@ -706,31 +705,20 @@ web:
 
 支持以下环境变量覆盖：
 
-- `CREDENTIALS_DIR`
-- `ABNORMAL_CREDENTIALS_DIR`
-- `STATE_DIR`
-- `CONFIG_PATH`
 - `LOG_LEVEL`
-- `LOGGING_MAX_FILE_SIZE`
-- `REQUEST_IDENTITY_ORIGINATOR`
-- `REQUEST_IDENTITY_USER_AGENT`
-- `CREDENTIAL_ABNORMAL_THRESHOLD`
-- `PROXY_MODE`
-- `PROXY_LIST`
 - `WEB_PASSWORD`
-- `WEB_LISTEN`
 - `PORT`
-- `WEB_SESSION_SECRET`
 
-管理页密码仅从环境变量读取。其他平台差异化参数可通过环境变量覆盖配置文件。
+管理页密码仅从环境变量读取。日志级别可通过环境变量预设。平台注入的 `PORT` 用于监听端口。其他参数通过配置文件和管理页面维护。
 
-监听地址优先级如下：
+配置文件路径优先级如下：
 
-1. `WEB_LISTEN`
-2. `PORT`，等价展开为 `0.0.0.0:${PORT}`
-3. 配置文件中的 `web.listen`
+1. CLI 显式指定的配置文件路径
+2. `./config.yaml`
+3. `/data/state/config.yaml`（当 `/data` 存在时）
+4. `./state/config.yaml`
 
-其中 `PROXY_LIST` 使用多行文本，一行一个代理，格式与管理页面编辑区一致。
+部署平台存在 `/data` 持久化卷时，默认凭证目录、异常区目录、状态目录和配置文件都优先落在 `/data` 下。监听地址优先使用平台注入的 `PORT`，否则读取配置文件中的 `web.listen`。代理列表等其他可编辑项由管理页面写回配置文件。
 
 ## 15. 部署与供应链控制
 
@@ -850,7 +838,7 @@ V1 的供应链控制要求如下：
 - 手动恢复异常区凭证，确认其重新回到正常区并恢复自动调度资格。
 - 停止自动刷新后确认调度暂停；重新开始后确认调度恢复。
 - 从 Zeabur 页面下载正常区 ZIP，并重新导入 `CLIProxyAPI` 验证可读性。
-- 验证 `WEB_LISTEN` / `PORT` 下的对外访问、登录态和持久化卷行为。
+- 验证 `web.listen` 配置、登录态和持久化卷行为。
 
 ### 16.4 验收标准
 
