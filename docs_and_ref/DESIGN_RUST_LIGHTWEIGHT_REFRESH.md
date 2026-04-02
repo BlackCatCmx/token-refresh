@@ -680,6 +680,7 @@ web:
 - `logging.max_file_size` 表示单个日志文件的滚动上限，默认 `1MiB`
 - 该上限同时作用于 `runtime.log` 与 `audit.log`
 - `log_level` 控制运行日志级别，不影响审计日志是否记录
+- `log_level` 仅支持 `info`、`warn`、`error`，其中 `info` 为最详细级别
 - 审计日志默认始终开启，不允许通过页面关闭
 
 采用源码部署且主要依赖环境变量时，可不持久化大部分配置，只挂载凭证目录和状态目录。

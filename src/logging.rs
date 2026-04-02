@@ -26,8 +26,6 @@ impl LogKind {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum RuntimeLogLevel {
-    Trace,
-    Debug,
     Info,
     Warn,
     Error,
@@ -36,8 +34,6 @@ enum RuntimeLogLevel {
 impl RuntimeLogLevel {
     fn parse(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "trace" => Ok(Self::Trace),
-            "debug" => Ok(Self::Debug),
             "info" => Ok(Self::Info),
             "warn" => Ok(Self::Warn),
             "error" => Ok(Self::Error),
@@ -256,5 +252,12 @@ mod tests {
         let content = std::fs::read_to_string(temp.path().join("logs/runtime.log")).unwrap();
         assert!(!content.contains("skip me"));
         assert!(content.contains("keep me now"));
+    }
+
+    #[test]
+    fn rejects_removed_runtime_levels() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(LogManager::new(temp.path(), 1024, "debug").is_err());
+        assert!(LogManager::new(temp.path(), 1024, "trace").is_err());
     }
 }

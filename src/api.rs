@@ -235,6 +235,10 @@ async fn import_json_credentials(
         .and_then(|files| import_json_files(&state.store, files))
     {
         Ok(imported) => {
+            let _ = state.logger.runtime(
+                "info",
+                format!("imported {} JSON credential file(s)", imported.len()),
+            );
             state.scheduler.wake();
             Json(serde_json::json!({ "imported": imported })).into_response()
         }
@@ -281,6 +285,10 @@ async fn import_zip_credentials(
     match field.bytes().await.context("failed to read uploaded ZIP") {
         Ok(bytes) => match import_zip(&state.store, &bytes) {
             Ok(imported) => {
+                let _ = state.logger.runtime(
+                    "info",
+                    format!("imported {} credential file(s) from ZIP", imported.len()),
+                );
                 state.scheduler.wake();
                 Json(serde_json::json!({ "imported": imported })).into_response()
             }
@@ -350,6 +358,13 @@ async fn restore_credentials(
         &payload.names,
     ) {
         Ok(count) => {
+            let _ = state.logger.runtime(
+                "info",
+                format!(
+                    "restored {} credential file(s) from abnormal to normal",
+                    count
+                ),
+            );
             state.scheduler.wake();
             Json(serde_json::json!({ "restored": count })).into_response()
         }
@@ -373,6 +388,14 @@ async fn delete_credentials(
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
         }
     }
+    let _ = state.logger.runtime(
+        "info",
+        format!(
+            "deleted {} credential file(s) from {} zone",
+            payload.names.len(),
+            zone.as_str()
+        ),
+    );
     state.scheduler.wake();
     Json(serde_json::json!({ "deleted": payload.names.len() })).into_response()
 }
@@ -442,6 +465,9 @@ async fn download_credential_archive(
 
 async fn start_scheduler(State(state): State<Arc<AppState>>) -> Response {
     state.scheduler.start().await;
+    let _ = state
+        .logger
+        .runtime("info", "scheduler enabled from web console");
     Json(SimpleMessage {
         message: "自动刷新已开启".to_string(),
     })
@@ -450,6 +476,9 @@ async fn start_scheduler(State(state): State<Arc<AppState>>) -> Response {
 
 async fn stop_scheduler(State(state): State<Arc<AppState>>) -> Response {
     state.scheduler.stop().await;
+    let _ = state
+        .logger
+        .runtime("info", "scheduler disabled from web console");
     Json(SimpleMessage {
         message: "自动刷新已停止".to_string(),
     })
@@ -594,6 +623,17 @@ async fn update_settings(
             state.logger.update_runtime_level(&config.log_level)
         }) {
             Ok(()) => {
+                let _ = state.logger.runtime(
+                    "info",
+                    format!(
+                        "settings updated (log_level={}, max_file_size={}, proxy_mode={}, abnormal_threshold={}, timeout={})",
+                        config.log_level.trim(),
+                        config.logging.max_file_size.trim(),
+                        config.proxy.mode.trim(),
+                        config.credential_management.abnormal_threshold,
+                        config.network.timeout.trim()
+                    ),
+                );
                 state.scheduler.wake();
                 Json(SimpleMessage {
                     message: "设置已保存".to_string(),

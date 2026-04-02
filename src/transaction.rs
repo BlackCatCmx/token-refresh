@@ -109,6 +109,20 @@ impl RefreshTransaction {
                 .await;
         }
 
+        self.logger.runtime(
+            "info",
+            format!(
+                "refresh starting for {} in {} via {} (expires_at={}, last_refresh={}, proxy_mode={}, timeout={})",
+                key,
+                zone.as_str(),
+                trigger.as_str(),
+                credential.expired.as_deref().unwrap_or("-"),
+                credential.last_refresh.as_deref().unwrap_or("-"),
+                config.proxy.mode.trim(),
+                config.network.timeout.trim()
+            ),
+        )?;
+
         match self
             .client
             .refresh(config, credential.refresh_token.trim())
@@ -131,6 +145,7 @@ impl RefreshTransaction {
         credential: &mut CodexCredentialFile,
         payload: RefreshResponsePayload,
     ) -> Result<RefreshOutcome> {
+        let previous_refresh_token = credential.refresh_token.clone();
         merge_refresh_response(credential, payload)?;
         credential.provider_type = "codex".to_string();
         credential.set_last_refresh_now();
@@ -156,10 +171,12 @@ impl RefreshTransaction {
         self.logger.runtime(
             "info",
             format!(
-                "refresh succeeded for {} in {} via {}",
+                "refresh succeeded for {} in {} via {} (expires_at={}, refresh_token_rotated={})",
                 key,
                 zone.as_str(),
-                trigger.as_str()
+                trigger.as_str(),
+                credential.expired.as_deref().unwrap_or("-"),
+                credential.refresh_token != previous_refresh_token
             ),
         )?;
         Ok(RefreshOutcome {
@@ -184,10 +201,14 @@ impl RefreshTransaction {
             .get(key)?
             .map(|record| record.consecutive_failure_count)
             .unwrap_or(0);
+        let failure_count = if error.count_towards_abnormal {
+            current_failures.saturating_add(1)
+        } else {
+            current_failures
+        };
         let should_move = zone == CredentialZone::Normal
             && error.count_towards_abnormal
-            && current_failures.saturating_add(1)
-                >= config.credential_management.abnormal_threshold;
+            && failure_count >= config.credential_management.abnormal_threshold;
         let moved = if should_move {
             match self.store.move_between_zones(
                 CredentialZone::Normal,
@@ -230,10 +251,15 @@ impl RefreshTransaction {
         self.logger.runtime(
             "warn",
             format!(
-                "refresh failed for {} in {} via {}: {}",
+                "refresh failed for {} in {} via {} (code={}, failure_count={}, count_towards_abnormal={}, moved_to_abnormal={}, final_zone={}): {}",
                 key,
                 zone.as_str(),
                 trigger.as_str(),
+                error.code,
+                failure_count,
+                error.count_towards_abnormal,
+                moved,
+                final_zone.as_str(),
                 error
             ),
         )?;

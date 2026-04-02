@@ -330,10 +330,7 @@ pub fn header_preview(config: &AppConfig) -> BTreeMap<String, String> {
 
 pub fn validate_config(config: &AppConfig) -> Result<()> {
     let level = config.log_level.trim().to_ascii_lowercase();
-    if !matches!(
-        level.as_str(),
-        "trace" | "debug" | "info" | "warn" | "error"
-    ) {
+    if !matches!(level.as_str(), "info" | "warn" | "error") {
         bail!("invalid log_level: {}", config.log_level);
     }
     originator::validate(config.request_identity.originator.trim())?;
@@ -632,5 +629,15 @@ mod tests {
         let resolved =
             storage_path_with_root(None, "./state/config.yaml", &["state", "config.yaml"]);
         assert_eq!(resolved, PathBuf::from("./state/config.yaml"));
+    }
+
+    #[test]
+    fn validate_config_rejects_removed_log_levels() {
+        let mut config = AppConfig::default();
+        config.log_level = "debug".to_string();
+        assert!(validate_config(&config).is_err());
+
+        config.log_level = "trace".to_string();
+        assert!(validate_config(&config).is_err());
     }
 }

@@ -95,6 +95,18 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         &config.log_level,
     )?);
     let _ = logger.runtime("info", "service starting");
+    let _ = logger.runtime(
+        "info",
+        format!(
+            "service config state_dir={} credentials_dir={} abnormal_dir={} log_level={} web_enabled={} listen={}",
+            config.state_dir.display(),
+            config.credentials_dir.display(),
+            config.abnormal_credentials_dir.display(),
+            config.log_level.trim(),
+            config.web.enabled,
+            config.web.listen.trim()
+        ),
+    );
     let store = Arc::new(CredentialStore::new(&config, Some(logger.clone()))?);
     recovery::recover_all(
         &[
@@ -115,6 +127,7 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
     let session_manager = SessionManager::new(&config_manager.web_password().await)?;
 
     if !config.web.enabled {
+        let _ = logger.runtime("info", "web interface disabled; scheduler-only mode active");
         scheduler.spawn_background(config_manager.clone(), store, transaction, logger);
         tokio::signal::ctrl_c().await?;
         return Ok(());
@@ -123,6 +136,10 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
     let listener = TcpListener::bind(config.web.listen.trim())
         .await
         .with_context(|| format!("failed to bind {}", config.web.listen))?;
+    let _ = logger.runtime(
+        "info",
+        format!("web interface listening on {}", config.web.listen.trim()),
+    );
 
     let state = Arc::new(AppState {
         config_manager: config_manager.clone(),

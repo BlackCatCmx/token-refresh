@@ -173,6 +173,17 @@ impl SchedulerRuntime {
             return Ok(());
         }
 
+        let _ = self.logger.runtime(
+            "info",
+            format!(
+                "scheduler picked {} due credential(s); next_wake_at={}",
+                due_entries.len(),
+                next_wake_at
+                    .map(|value| value.to_rfc3339())
+                    .unwrap_or_else(|| "none".to_string())
+            ),
+        );
+
         for key in due_entries {
             if !self.enabled.load(Ordering::SeqCst) {
                 break;
@@ -226,6 +237,15 @@ impl SchedulerRuntime {
             + chrono::Duration::from_std(failure_backoff)
                 .map_err(|err| anyhow::anyhow!("invalid failure_backoff duration: {err}"))?;
         backoff.insert(outcome.key.clone(), until);
+        let _ = self.logger.runtime(
+            "info",
+            format!(
+                "scheduler backoff set for {} until {} (failure_code={})",
+                outcome.key,
+                until.to_rfc3339(),
+                outcome.failure_code.as_deref().unwrap_or("unknown")
+            ),
+        );
         Ok(())
     }
 }
