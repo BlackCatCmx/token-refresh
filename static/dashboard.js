@@ -28,13 +28,25 @@ async function refreshAll() {
 
 async function loadScheduler() {
   const data = await api("/api/scheduler/status");
-  const text = [
-    `自动刷新: ${data.enabled ? "开启" : "停止"}`,
-    data.current_key ? `当前账号: ${data.current_key}` : "当前账号: 无",
-    data.next_wake_at ? `下次唤醒: ${data.next_wake_at}` : "下次唤醒: 待定",
-    data.last_error ? `最近错误: ${data.last_error}` : "最近错误: 无",
-  ].join(" | ");
-  document.getElementById("scheduler-status").textContent = text;
+  const container = document.getElementById("scheduler-status");
+  const rows = [
+    ["自动刷新", data.enabled ? "开启" : "停止"],
+    ["当前账号", data.current_key || "无"],
+    ["下次唤醒", data.next_wake_at ? shortTime(data.next_wake_at) : "待定"],
+    ["最近错误", data.last_error || "无"],
+  ];
+  container.innerHTML = rows.map(([label, value]) =>
+    `<span class="status-label">${escapeHtml(label)}</span><span>${escapeHtml(value)}</span>`
+  ).join("");
+}
+
+function shortTime(rfc3339) {
+  try {
+    const d = new Date(rfc3339);
+    return d.toLocaleString("zh-CN", { hour12: false });
+  } catch {
+    return rfc3339;
+  }
 }
 
 async function schedulerAction(action) {
@@ -120,21 +132,25 @@ async function loadCredentials(zone) {
   const tbody = document.getElementById(`${zone}-table`);
   tbody.innerHTML = "";
   document.getElementById(`${zone}-select-all`).checked = false;
+  if (data.items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" class="empty-hint">暂无凭证</td></tr>`;
+    return;
+  }
   for (const row of data.items) {
     const tr = document.createElement("tr");
     const status = row.zone === "abnormal" ? '<span class="pill">异常区</span>' : '<span class="pill">正常</span>';
     const failure = row.last_failure_code ? `${row.last_failure_code} (${row.consecutive_failure_count})` : "-";
     const encodedName = encodeURIComponent(row.name);
     const actions = zone === "normal"
-      ? `<button onclick="manualRefresh('${encodedName}')">刷新</button> <button class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button> <button class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>`
-      : `<button onclick="restoreCredential('${encodedName}')">恢复</button> <button class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button> <button class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>`;
+      ? `<div class="actions"><button onclick="manualRefresh('${encodedName}')">刷新</button><button class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button><button class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button></div>`
+      : `<div class="actions"><button onclick="restoreCredential('${encodedName}')">恢复</button><button class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button><button class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button></div>`;
     tr.innerHTML = `
       <td class="checkbox-cell"><input class="row-check" type="checkbox" data-zone="${zone}" data-name="${encodedName}" onchange="syncSelectAll('${zone}')"></td>
-      <td>${escapeHtml(row.name)}<div class="muted">${escapeHtml(row.path)}</div></td>
+      <td>${escapeHtml(row.name)}</td>
       <td>${escapeHtml(row.email || "-")}</td>
       <td>${status}</td>
-      <td>${escapeHtml(row.last_refresh || "-")}</td>
-      <td>${escapeHtml(row.expired || "-")}</td>
+      <td class="nowrap">${escapeHtml(row.last_refresh ? shortTime(row.last_refresh) : "-")}</td>
+      <td class="nowrap">${escapeHtml(row.expired ? shortTime(row.expired) : "-")}</td>
       <td>${escapeHtml(failure)}<div class="danger-text">${escapeHtml(row.parse_error || row.last_failure_reason || "")}</div></td>
       <td>${actions}</td>`;
     tbody.appendChild(tr);

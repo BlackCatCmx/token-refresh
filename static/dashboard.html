@@ -20,8 +20,10 @@
   <main>
     <section>
       <h2>调度状态</h2>
-      <div id="scheduler-status" class="muted">加载中...</div>
-      <div class="toolbar">
+      <div id="scheduler-status" class="status-grid">
+        <span class="status-label">加载中...</span>
+      </div>
+      <div class="toolbar" style="margin-top: 12px;">
         <button onclick="schedulerAction('start')">开始自动刷新</button>
         <button class="warn" onclick="schedulerAction('stop')">停止自动刷新</button>
       </div>
@@ -81,7 +83,7 @@
         <table>
           <thead>
             <tr>
-              <th><input id="normal-select-all" type="checkbox" onchange="toggleAll('normal', this.checked)"></th>
+              <th class="checkbox-cell"><input id="normal-select-all" type="checkbox" onchange="toggleAll('normal', this.checked)"></th>
               <th>名称</th>
               <th>邮箱</th>
               <th>状态</th>
@@ -104,7 +106,7 @@
         <table>
           <thead>
             <tr>
-              <th><input id="abnormal-select-all" type="checkbox" onchange="toggleAll('abnormal', this.checked)"></th>
+              <th class="checkbox-cell"><input id="abnormal-select-all" type="checkbox" onchange="toggleAll('abnormal', this.checked)"></th>
               <th>名称</th>
               <th>邮箱</th>
               <th>状态</th>

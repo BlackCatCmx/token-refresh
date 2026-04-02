@@ -1,3 +1,9 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
   font-family: "Segoe UI", "PingFang SC", sans-serif;
@@ -45,14 +51,14 @@ section {
   margin-bottom: 12px;
 }
 
-button,
-select {
+button {
   border: 0;
   border-radius: 12px;
   padding: 10px 14px;
   background: #163dff;
   color: white;
   cursor: pointer;
+  font-size: inherit;
 }
 
 button.secondary {
@@ -76,7 +82,7 @@ select {
   padding: 10px 12px;
   background: white;
   color: inherit;
-  box-sizing: border-box;
+  font-size: inherit;
 }
 
 textarea {
@@ -137,6 +143,11 @@ pre {
   padding: 14px;
   overflow: auto;
   min-height: 180px;
+  max-height: 420px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .muted {
@@ -153,6 +164,41 @@ pre {
 
 .danger-text {
   color: #b42318;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.status-label {
+  color: #62748a;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.actions button {
+  padding: 5px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+td.nowrap {
+  white-space: nowrap;
+}
+
+.empty-hint {
+  text-align: center;
+  padding: 28px 12px;
+  color: #94a3b8;
 }
 
 .login-page {
@@ -179,6 +225,14 @@ pre {
   margin-top: 16px;
 }
 
+select:disabled,
+input:disabled,
+textarea:disabled {
+  background: #f1f5f9;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
 @media (max-width: 720px) {
   header,
   main {
@@ -189,5 +243,17 @@ pre {
   header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .list {
+    max-height: 300px;
+  }
+
+  table {
+    font-size: 12px;
+  }
+
+  th, td {
+    padding: 6px;
   }
 }
