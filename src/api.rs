@@ -181,7 +181,6 @@ struct CredentialsResponse {
 struct CredentialView {
     name: String,
     zone: String,
-    path: String,
     email: Option<String>,
     account_id: Option<String>,
     last_refresh: Option<String>,
@@ -212,7 +211,6 @@ fn build_credential_views(state: &AppState, zone: CredentialZone) -> Result<Vec<
         items.push(CredentialView {
             name: entry.key.clone(),
             zone: zone.as_str().to_string(),
-            path: entry.path.display().to_string(),
             email: credential.and_then(|value| value.email.clone()),
             account_id: credential.and_then(|value| value.account_id.clone()),
             last_refresh: credential.and_then(|value| value.last_refresh.clone()),

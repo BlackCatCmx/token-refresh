@@ -41,12 +41,9 @@ async function loadScheduler() {
 }
 
 function shortTime(rfc3339) {
-  try {
-    const d = new Date(rfc3339);
-    return d.toLocaleString("zh-CN", { hour12: false });
-  } catch {
-    return rfc3339;
-  }
+  const d = new Date(rfc3339);
+  if (isNaN(d.getTime())) return rfc3339;
+  return d.toLocaleString("zh-CN", { hour12: false });
 }
 
 async function schedulerAction(action) {
