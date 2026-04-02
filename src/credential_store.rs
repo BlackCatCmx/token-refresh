@@ -315,7 +315,33 @@ fn is_json_file(path: &Path) -> bool {
 
 fn is_likely_codex_json(bytes: &[u8]) -> bool {
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-    text.contains("\"type\"") && text.contains("\"codex\"")
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while let Some(start) = find_subslice(&bytes[index..], br#""type""#) {
+        let mut cursor = index + start + br#""type""#.len();
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b':' {
+            index = cursor;
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if bytes[cursor..].starts_with(br#""codex""#) {
+            return true;
+        }
+        index = cursor;
+    }
+    false
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn remove_empty_ancestors(path: &Path, stop_at: &Path) -> Result<()> {
@@ -375,6 +401,12 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(entries[0].parse_error.is_some());
         assert!(entries[0].credential.is_none());
+    }
+
+    #[test]
+    fn does_not_treat_unrelated_text_as_codex_pair() {
+        let bytes = br#"{"description":"some type info about codex","broken":"#;
+        assert!(!is_likely_codex_json(bytes));
     }
 
     #[test]

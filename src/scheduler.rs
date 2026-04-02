@@ -105,12 +105,6 @@ impl SchedulerHandle {
     }
 }
 
-impl Default for SchedulerHandle {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SchedulerRuntime {
     async fn run(self) {
         loop {
