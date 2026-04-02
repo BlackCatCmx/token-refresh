@@ -27,7 +27,7 @@ async function refreshAll() {
 }
 
 async function loadScheduler() {
-  const data = await api("/api/scheduler/status");
+  const data = await api("api/scheduler/status");
   const container = document.getElementById("scheduler-status");
   const rows = [
     ["自动刷新", data.enabled ? "开启" : "停止"],
@@ -52,7 +52,7 @@ async function schedulerAction(action) {
 }
 
 async function loadSettings() {
-  const data = await api("/api/settings");
+  const data = await api("api/settings");
   document.getElementById("originator").value = data.settings.request_identity.originator;
   document.getElementById("user-agent").value = data.settings.request_identity.user_agent;
   document.getElementById("log-level").value = data.settings.log_level;
@@ -114,7 +114,7 @@ async function saveSettings() {
       timeout: document.getElementById("network-timeout").value,
     },
   };
-  await api("/api/settings", {
+  await api("api/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -125,7 +125,7 @@ async function saveSettings() {
 }
 
 async function loadCredentials(zone) {
-  const data = await api(`/api/credentials?zone=${zone}`);
+  const data = await api(`api/credentials?zone=${zone}`);
   const tbody = document.getElementById(`${zone}-table`);
   tbody.innerHTML = "";
   document.getElementById(`${zone}-select-all`).checked = false;
@@ -176,7 +176,7 @@ function syncSelectAll(zone) {
 }
 
 async function manualRefresh(name) {
-  await api("/api/credentials/refresh", {
+  await api("api/credentials/refresh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: decodeURIComponent(name) }),
@@ -185,7 +185,7 @@ async function manualRefresh(name) {
 }
 
 async function restoreCredential(name) {
-  await api("/api/credentials/restore", {
+  await api("api/credentials/restore", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ names: [decodeURIComponent(name)] }),
@@ -195,7 +195,7 @@ async function restoreCredential(name) {
 
 async function deleteCredential(zone, name) {
   if (!confirm("确认删除这个凭证吗？")) return;
-  await api("/api/credentials/delete", {
+  await api("api/credentials/delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ zone, names: [decodeURIComponent(name)] }),
@@ -210,7 +210,7 @@ async function deleteSelected(zone) {
     return;
   }
   if (!confirm(`确认删除选中的 ${names.length} 个凭证吗？`)) return;
-  await api("/api/credentials/delete", {
+  await api("api/credentials/delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ zone, names }),
@@ -219,11 +219,11 @@ async function deleteSelected(zone) {
 }
 
 function downloadCredential(zone, name) {
-  window.location.href = `/api/credentials/download?zone=${zone}&name=${name}`;
+  window.location.href = `api/credentials/download?zone=${zone}&name=${name}`;
 }
 
 function downloadCredentialArchive(zone) {
-  window.location.href = `/api/credentials/archive.zip?zone=${zone}`;
+  window.location.href = `api/credentials/archive.zip?zone=${zone}`;
 }
 
 async function importJsonFiles() {
@@ -231,7 +231,7 @@ async function importJsonFiles() {
   if (!input.files.length) return alert("请选择 JSON 文件");
   const form = new FormData();
   for (const file of input.files) form.append("files", file, file.name);
-  await api("/api/credentials/import-json", { method: "POST", body: form });
+  await api("api/credentials/import-json", { method: "POST", body: form });
   input.value = "";
   await refreshAll();
 }
@@ -241,22 +241,22 @@ async function importZipFile() {
   if (!input.files.length) return alert("请选择 ZIP 文件");
   const form = new FormData();
   form.append("file", input.files[0], input.files[0].name);
-  await api("/api/credentials/import-zip", { method: "POST", body: form });
+  await api("api/credentials/import-zip", { method: "POST", body: form });
   input.value = "";
   await refreshAll();
 }
 
 async function reloadLog(kind) {
-  const data = await api(`/api/logs?kind=${kind}&limit=120`);
+  const data = await api(`api/logs?kind=${kind}&limit=120`);
   document.getElementById(`${kind}-log`).textContent = data.content || "";
 }
 
 function downloadLog(kind) {
-  window.location.href = `/api/logs/download?kind=${kind}`;
+  window.location.href = `api/logs/download?kind=${kind}`;
 }
 
 async function clearLog(kind) {
-  await api("/api/logs/clear", {
+  await api("api/logs/clear", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind }),
@@ -265,7 +265,7 @@ async function clearLog(kind) {
 }
 
 async function logout() {
-  await api("/api/session/logout", { method: "POST" });
+  await api("api/session/logout", { method: "POST" });
   location.reload();
 }
 
