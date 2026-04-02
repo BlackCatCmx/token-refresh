@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn restores_target_from_recovery_file() {
         let temp = tempfile::tempdir().unwrap();
-        let logs = LogManager::new(temp.path(), 1024).unwrap();
+        let logs = LogManager::new(temp.path(), 1024, "info").unwrap();
         let target = temp.path().join("account.json");
         let credential = CodexCredentialFile {
             access_token: "new-access".to_string(),

@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use walkdir::WalkDir;
@@ -7,6 +9,7 @@ use walkdir::WalkDir;
 use crate::config::AppConfig;
 use crate::credential::CodexCredentialFile;
 use crate::fsutil;
+use crate::logging::LogManager;
 use crate::recovery;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,13 +58,17 @@ impl CredentialEntry {
 pub struct CredentialStore {
     normal_dir: PathBuf,
     abnormal_dir: PathBuf,
+    logger: Option<Arc<LogManager>>,
+    warned_skipped_files: Arc<Mutex<HashSet<String>>>,
 }
 
 impl CredentialStore {
-    pub fn new(config: &AppConfig) -> Result<Self> {
+    pub fn new(config: &AppConfig, logger: Option<Arc<LogManager>>) -> Result<Self> {
         let store = Self {
             normal_dir: config.credentials_dir.clone(),
             abnormal_dir: config.abnormal_credentials_dir.clone(),
+            logger,
+            warned_skipped_files: Arc::new(Mutex::new(HashSet::new())),
         };
         store.ensure_dirs()?;
         Ok(store)
@@ -113,13 +120,19 @@ impl CredentialStore {
                     parse_error: None,
                 }),
                 Ok(_) => {}
-                Err(err) => entries.push(CredentialEntry {
-                    zone,
-                    key,
-                    path,
-                    credential: None,
-                    parse_error: Some(err.to_string()),
-                }),
+                Err(err) => {
+                    if is_likely_codex_json(&bytes) {
+                        entries.push(CredentialEntry {
+                            zone,
+                            key,
+                            path,
+                            credential: None,
+                            parse_error: Some(err.to_string()),
+                        });
+                    } else {
+                        self.log_skipped_invalid_json(&path, &err.to_string());
+                    }
+                }
             }
         }
         entries.sort_by(|left, right| left.key.cmp(&right.key));
@@ -230,6 +243,24 @@ impl CredentialStore {
             CredentialZone::Abnormal => &self.abnormal_dir,
         }
     }
+
+    fn log_skipped_invalid_json(&self, path: &Path, reason: &str) {
+        let Some(logger) = self.logger.as_ref() else {
+            return;
+        };
+        let key = path.display().to_string();
+        let mut warned = match self.warned_skipped_files.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        if !warned.insert(key.clone()) {
+            return;
+        }
+        let _ = logger.runtime(
+            "warn",
+            format!("skipping invalid non-codex json file {}: {}", key, reason),
+        );
+    }
 }
 
 pub fn import_key_for(name: &str, credential: &CodexCredentialFile) -> Result<String> {
@@ -282,6 +313,11 @@ fn is_json_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_likely_codex_json(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    text.contains("\"type\"") && text.contains("\"codex\"")
+}
+
 fn remove_empty_ancestors(path: &Path, stop_at: &Path) -> Result<()> {
     let mut current = path.parent();
     while let Some(dir) = current {
@@ -297,4 +333,100 @@ fn remove_empty_ancestors(path: &Path, stop_at: &Path) -> Result<()> {
         current = dir.parent();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::credential::CodexCredentialFile;
+
+    #[test]
+    fn skips_invalid_non_codex_json_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        std::fs::write(
+            config.credentials_dir.join("broken.json"),
+            br#"{"type":"other","broken":"#,
+        )
+        .unwrap();
+
+        let entries = store.scan_zone(CredentialZone::Normal).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn keeps_invalid_codex_json_files_visible() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        std::fs::write(
+            config.credentials_dir.join("broken-codex.json"),
+            br#"{"type":"codex","refresh_token":"abc""#,
+        )
+        .unwrap();
+
+        let entries = store.scan_zone(CredentialZone::Normal).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].parse_error.is_some());
+        assert!(entries[0].credential.is_none());
+    }
+
+    #[test]
+    fn scans_valid_codex_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let credential = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            email: Some("user@example.com".to_string()),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "user@example.com.json", &credential)
+            .unwrap();
+
+        let entries = store.scan_zone(CredentialZone::Normal).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].credential.as_ref().unwrap().is_codex());
+    }
+
+    #[test]
+    fn logs_skipped_invalid_non_codex_json_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let logger = Arc::new(LogManager::new(temp.path(), 4096, "warn").unwrap());
+        let store = CredentialStore::new(&config, Some(logger.clone())).unwrap();
+        std::fs::write(
+            config.credentials_dir.join("ignored.json"),
+            br#"{"type":"other","broken":"#,
+        )
+        .unwrap();
+
+        let _ = store.scan_zone(CredentialZone::Normal).unwrap();
+        let _ = store.scan_zone(CredentialZone::Normal).unwrap();
+
+        let content = logger
+            .read_tail(crate::logging::LogKind::Runtime, 20)
+            .unwrap();
+        assert!(content.contains("skipping invalid non-codex json file"));
+        assert_eq!(
+            content
+                .lines()
+                .filter(|line| line.contains("ignored.json"))
+                .count(),
+            1
+        );
+    }
 }

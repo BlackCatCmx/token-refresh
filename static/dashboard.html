@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Refresh 控制台</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Codex Refresh 控制台</h1>
+      <div class="muted">上传凭证、查看状态、调参数、手动刷新、处理异常区都在这里。</div>
+    </div>
+    <div class="toolbar">
+      <button class="secondary" onclick="refreshAll()">刷新页面数据</button>
+      <button class="danger" onclick="logout()">退出</button>
+    </div>
+  </header>
+  <main>
+    <section>
+      <h2>调度状态</h2>
+      <div id="scheduler-status" class="muted">加载中...</div>
+      <div class="toolbar">
+        <button onclick="schedulerAction('start')">开始自动刷新</button>
+        <button class="warn" onclick="schedulerAction('stop')">停止自动刷新</button>
+      </div>
+    </section>
+    <section>
+      <h2>导入与导出</h2>
+      <div class="grid">
+        <div>
+          <label>导入多个 JSON</label>
+          <input id="json-files" type="file" multiple accept=".json">
+          <button onclick="importJsonFiles()">上传 JSON</button>
+        </div>
+        <div>
+          <label>导入 ZIP</label>
+          <input id="zip-file" type="file" accept=".zip">
+          <button onclick="importZipFile()">上传 ZIP</button>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button onclick="downloadCredentialArchive('normal')">下载正常区 ZIP</button>
+        <button onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
+        <button class="secondary" onclick="downloadCredentialArchive('all')">下载全部 ZIP</button>
+      </div>
+    </section>
+    <section>
+      <h2>请求头预览</h2>
+      <pre id="header-preview"></pre>
+    </section>
+    <section>
+      <h2>设置</h2>
+      <div class="grid">
+        <div><label>originator</label><input id="originator"></div>
+        <div><label>User-Agent</label><input id="user-agent"></div>
+        <div><label>日志级别</label><input id="log-level"></div>
+        <div><label>日志单文件上限</label><input id="max-file-size"></div>
+        <div><label>代理模式</label><select id="proxy-mode"><option value="fixed">fixed</option><option value="round_robin">round_robin</option></select></div>
+        <div><label>异常阈值</label><input id="abnormal-threshold" type="number" min="1"></div>
+        <div><label>提前刷新窗口</label><input id="lead-time"></div>
+        <div><label>刷新间最小延迟</label><input id="delay-min"></div>
+        <div><label>刷新间最大延迟</label><input id="delay-max"></div>
+        <div><label>失败退避</label><input id="failure-backoff"></div>
+        <div><label>网络超时</label><input id="network-timeout"></div>
+      </div>
+      <label>SOCKS5 代理列表</label>
+      <textarea id="proxy-list" placeholder="一行一个 socks5://ip:port"></textarea>
+      <div class="toolbar">
+        <button onclick="saveSettings()">保存设置</button>
+      </div>
+      <div id="settings-meta" class="muted"></div>
+    </section>
+    <section style="grid-column: 1 / -1;">
+      <h2>正常区凭证</h2>
+      <div class="toolbar">
+        <button class="danger" onclick="deleteSelected('normal')">删除选中</button>
+      </div>
+      <div class="list">
+        <table>
+          <thead>
+            <tr>
+              <th><input id="normal-select-all" type="checkbox" onchange="toggleAll('normal', this.checked)"></th>
+              <th>名称</th>
+              <th>邮箱</th>
+              <th>状态</th>
+              <th>最近刷新</th>
+              <th>过期时间</th>
+              <th>异常</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="normal-table"></tbody>
+        </table>
+      </div>
+    </section>
+    <section style="grid-column: 1 / -1;">
+      <h2>异常区凭证</h2>
+      <div class="toolbar">
+        <button class="danger" onclick="deleteSelected('abnormal')">删除选中</button>
+      </div>
+      <div class="list">
+        <table>
+          <thead>
+            <tr>
+              <th><input id="abnormal-select-all" type="checkbox" onchange="toggleAll('abnormal', this.checked)"></th>
+              <th>名称</th>
+              <th>邮箱</th>
+              <th>状态</th>
+              <th>最近刷新</th>
+              <th>过期时间</th>
+              <th>异常</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="abnormal-table"></tbody>
+        </table>
+      </div>
+    </section>
+    <section>
+      <h2>运行日志</h2>
+      <div class="toolbar">
+        <button onclick="reloadLog('runtime')">刷新</button>
+        <button onclick="downloadLog('runtime')">下载</button>
+        <button class="warn" onclick="clearLog('runtime')">清空</button>
+      </div>
+      <pre id="runtime-log"></pre>
+    </section>
+    <section>
+      <h2>审计日志</h2>
+      <div class="toolbar">
+        <button onclick="reloadLog('audit')">刷新</button>
+        <button onclick="downloadLog('audit')">下载</button>
+        <button class="warn" onclick="clearLog('audit')">清空</button>
+        <button class="secondary" onclick="downloadLog('all')">打包下载全部日志</button>
+      </div>
+      <pre id="audit-log"></pre>
+    </section>
+  </main>
+  <script src="/assets/dashboard.js" defer></script>
+</body>
+</html>

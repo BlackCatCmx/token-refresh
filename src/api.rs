@@ -17,7 +17,7 @@ use crate::config::{EditableSettings, parse_byte_size_str};
 use crate::credential_store::{CredentialStore, CredentialZone};
 use crate::import::{ImportedFile, import_json_files, import_zip};
 use crate::logging::LogKind;
-use crate::web::{AppState, dashboard_page, login_page};
+use crate::web::{AppState, app_css, dashboard_js, dashboard_page, login_js, login_page};
 
 pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
@@ -50,18 +50,51 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/", get(index))
+        .route("/assets/app.css", get(asset_app_css))
+        .route("/assets/login.js", get(asset_login_js))
+        .route("/assets/dashboard.js", get(asset_dashboard_js))
         .route("/api/session/login", post(login))
         .route("/api/health", get(health))
         .merge(protected)
         .with_state(state)
 }
 
-async fn index(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+async fn index(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<&'static str> {
     if state.session_manager.is_authenticated(&headers) {
         Html(dashboard_page())
     } else {
-        Html(login_page(None))
+        Html(login_page())
     }
+}
+
+async fn asset_app_css() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        app_css(),
+    )
+        .into_response()
+}
+
+async fn asset_login_js() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        login_js(),
+    )
+        .into_response()
+}
+
+async fn asset_dashboard_js() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        dashboard_js(),
+    )
+        .into_response()
 }
 
 async fn auth_middleware(
@@ -558,9 +591,10 @@ async fn update_settings(
     Json(payload): Json<EditableSettings>,
 ) -> Response {
     match state.config_manager.update_settings(payload).await {
-        Ok(config) => match parse_byte_size_str(&config.logging.max_file_size)
-            .and_then(|size| state.logger.update_max_file_size(size))
-        {
+        Ok(config) => match parse_byte_size_str(&config.logging.max_file_size).and_then(|size| {
+            state.logger.update_max_file_size(size)?;
+            state.logger.update_runtime_level(&config.log_level)
+        }) {
             Ok(()) => {
                 state.scheduler.wake();
                 Json(SimpleMessage {

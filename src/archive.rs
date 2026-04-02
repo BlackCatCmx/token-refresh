@@ -44,7 +44,7 @@ fn add_zone(
 ) -> Result<()> {
     for entry in store.scan_zone(zone)? {
         let bytes = store.read_bytes(zone, &entry.key)?;
-        writer.start_file(format!("{prefix}{}", entry.file_name()), options)?;
+        writer.start_file(format!("{prefix}{}", entry.key), options)?;
         writer.write_all(&bytes)?;
     }
     Ok(())
@@ -62,7 +62,7 @@ mod tests {
         let mut config = AppConfig::default();
         config.credentials_dir = temp.path().join("credentials");
         config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
-        let store = CredentialStore::new(&config).unwrap();
+        let store = CredentialStore::new(&config, None).unwrap();
         let credential = CodexCredentialFile {
             access_token: "access".to_string(),
             refresh_token: "refresh".to_string(),
@@ -89,5 +89,36 @@ mod tests {
         }
         assert!(names.contains(&"normal/user@example.com.json".to_string()));
         assert!(names.contains(&"abnormal/user2@example.com.json".to_string()));
+    }
+
+    #[test]
+    fn archive_preserves_relative_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let credential = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            email: Some("user@example.com".to_string()),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(
+                CredentialZone::Normal,
+                "nested/user@example.com.json",
+                &credential,
+            )
+            .unwrap();
+        let bytes = build_credential_archive(&store, "normal").unwrap();
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let mut names = Vec::new();
+        for index in 0..archive.len() {
+            names.push(archive.by_index(index).unwrap().name().to_string());
+        }
+        assert!(names.contains(&"nested/user@example.com.json".to_string()));
     }
 }

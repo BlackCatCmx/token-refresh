@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{AppConfig, parse_duration_str};
@@ -46,7 +46,6 @@ impl RefreshClient {
                 .map_err(|err| RefreshFailure::transient("invalid_user_agent", err.to_string()))?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
         let response = client
             .post(TOKEN_URL)

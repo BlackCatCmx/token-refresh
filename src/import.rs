@@ -78,7 +78,7 @@ mod tests {
         let mut config = AppConfig::default();
         config.credentials_dir = temp.path().join("credentials");
         config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
-        let store = CredentialStore::new(&config).unwrap();
+        let store = CredentialStore::new(&config, None).unwrap();
 
         let credential = serde_json::json!({
             "id_token": "",

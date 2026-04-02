@@ -24,17 +24,40 @@ impl LogKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RuntimeLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl RuntimeLogLevel {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "trace" => Ok(Self::Trace),
+            "debug" => Ok(Self::Debug),
+            "info" => Ok(Self::Info),
+            "warn" => Ok(Self::Warn),
+            "error" => Ok(Self::Error),
+            other => bail!("unsupported runtime log level: {other}"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct LogManager {
     dir: PathBuf,
     runtime_path: PathBuf,
     audit_path: PathBuf,
     max_file_size: Mutex<u64>,
+    runtime_level: Mutex<RuntimeLogLevel>,
     write_lock: Mutex<()>,
 }
 
 impl LogManager {
-    pub fn new(state_dir: &Path, max_file_size: u64) -> Result<Self> {
+    pub fn new(state_dir: &Path, max_file_size: u64, runtime_level: &str) -> Result<Self> {
         let dir = state_dir.join("logs");
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create log dir {}", dir.display()))?;
@@ -47,6 +70,7 @@ impl LogManager {
             runtime_path,
             audit_path,
             max_file_size: Mutex::new(max_file_size),
+            runtime_level: Mutex::new(RuntimeLogLevel::parse(runtime_level)?),
             write_lock: Mutex::new(()),
         })
     }
@@ -64,7 +88,24 @@ impl LogManager {
         Ok(())
     }
 
+    pub fn update_runtime_level(&self, runtime_level: &str) -> Result<()> {
+        let mut guard = self
+            .runtime_level
+            .lock()
+            .map_err(|_| anyhow::anyhow!("log level lock poisoned"))?;
+        *guard = RuntimeLogLevel::parse(runtime_level)?;
+        Ok(())
+    }
+
     pub fn runtime(&self, level: &str, message: impl AsRef<str>) -> Result<()> {
+        let event_level = RuntimeLogLevel::parse(level)?;
+        let threshold = *self
+            .runtime_level
+            .lock()
+            .map_err(|_| anyhow::anyhow!("log level lock poisoned"))?;
+        if event_level < threshold {
+            return Ok(());
+        }
         self.append(
             self.runtime_path.as_path(),
             format!(
@@ -113,14 +154,6 @@ impl LogManager {
             LogKind::Audit => fs::read(&self.audit_path)
                 .with_context(|| format!("failed to read {}", self.audit_path.display())),
             LogKind::All => bail!("LogKind::All requires archive download"),
-        }
-    }
-
-    pub fn path_for(&self, kind: LogKind) -> Result<&Path> {
-        match kind {
-            LogKind::Runtime => Ok(self.runtime_path.as_path()),
-            LogKind::Audit => Ok(self.audit_path.as_path()),
-            LogKind::All => bail!("LogKind::All does not map to a single file"),
         }
     }
 
@@ -192,7 +225,7 @@ mod tests {
     #[test]
     fn truncates_when_file_exceeds_limit() {
         let temp = tempfile::tempdir().unwrap();
-        let manager = LogManager::new(temp.path(), 60).unwrap();
+        let manager = LogManager::new(temp.path(), 60, "info").unwrap();
         manager
             .runtime("info", "first line that is long enough")
             .unwrap();
@@ -200,5 +233,28 @@ mod tests {
         let content = std::fs::read_to_string(temp.path().join("logs/runtime.log")).unwrap();
         assert!(content.contains("second line"));
         assert!(!content.contains("first line that is long enough"));
+    }
+
+    #[test]
+    fn filters_runtime_messages_by_level() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = LogManager::new(temp.path(), 1024, "warn").unwrap();
+        manager.runtime("info", "skip me").unwrap();
+        manager.runtime("error", "keep me").unwrap();
+        let content = std::fs::read_to_string(temp.path().join("logs/runtime.log")).unwrap();
+        assert!(!content.contains("skip me"));
+        assert!(content.contains("keep me"));
+    }
+
+    #[test]
+    fn updates_runtime_level_without_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = LogManager::new(temp.path(), 1024, "error").unwrap();
+        manager.runtime("warn", "skip me").unwrap();
+        manager.update_runtime_level("warn").unwrap();
+        manager.runtime("warn", "keep me now").unwrap();
+        let content = std::fs::read_to_string(temp.path().join("logs/runtime.log")).unwrap();
+        assert!(!content.contains("skip me"));
+        assert!(content.contains("keep me now"));
     }
 }

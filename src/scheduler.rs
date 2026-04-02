@@ -27,6 +27,7 @@ pub struct SchedulerHandle {
     enabled: Arc<AtomicBool>,
     notify: Arc<Notify>,
     status: Arc<RwLock<SchedulerStatus>>,
+    backoff_until: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
 }
 
 struct SchedulerRuntime {
@@ -41,36 +42,38 @@ struct SchedulerRuntime {
 }
 
 impl SchedulerHandle {
-    pub fn new(
+    pub fn new() -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(true)),
+            notify: Arc::new(Notify::new()),
+            status: Arc::new(RwLock::new(SchedulerStatus {
+                enabled: true,
+                ..SchedulerStatus::default()
+            })),
+            backoff_until: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub fn spawn_background(
+        &self,
         config_manager: ConfigManager,
         store: Arc<CredentialStore>,
         transaction: Arc<RefreshTransaction>,
         logger: Arc<LogManager>,
-    ) -> Self {
-        let enabled = Arc::new(AtomicBool::new(true));
-        let notify = Arc::new(Notify::new());
-        let status = Arc::new(RwLock::new(SchedulerStatus {
-            enabled: true,
-            ..SchedulerStatus::default()
-        }));
+    ) {
         let runtime = SchedulerRuntime {
             config_manager,
             store,
             transaction,
             logger,
-            enabled: enabled.clone(),
-            notify: notify.clone(),
-            status: status.clone(),
-            backoff_until: Arc::new(RwLock::new(HashMap::new())),
+            enabled: self.enabled.clone(),
+            notify: self.notify.clone(),
+            status: self.status.clone(),
+            backoff_until: self.backoff_until.clone(),
         };
         tokio::spawn(async move {
             runtime.run().await;
         });
-        Self {
-            enabled,
-            notify,
-            status,
-        }
     }
 
     pub async fn start(&self) {
@@ -99,6 +102,12 @@ impl SchedulerHandle {
 
     pub fn wake(&self) {
         self.notify.notify_waiters();
+    }
+}
+
+impl Default for SchedulerHandle {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
