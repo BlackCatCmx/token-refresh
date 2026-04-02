@@ -1,0 +1,34 @@
+credentials_dir: "./credentials"
+abnormal_credentials_dir: "./credentials_abnormal"
+state_dir: "./state"
+log_level: "info"
+
+logging:
+  max_file_size: "1MiB"
+
+request_identity:
+  originator: "codex_cli_rs"
+  user_agent: "codex_cli_rs/0.118.0 (Windows 10.0.19045; x86_64) WindowsTerminal"
+
+proxy:
+  mode: "fixed"
+  list: |
+    socks5://127.0.0.1:10808
+
+credential_management:
+  abnormal_threshold: 1
+
+refresh:
+  lead_time: "24h"
+  min_sleep: "60s"
+  max_sleep: "10m"
+  inter_refresh_delay_min: "30s"
+  inter_refresh_delay_max: "90s"
+  failure_backoff: "15m"
+
+network:
+  timeout: "30s"
+
+web:
+  enabled: true
+  listen: "0.0.0.0:9876"

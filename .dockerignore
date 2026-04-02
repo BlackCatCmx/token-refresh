@@ -1,0 +1,8 @@
+/target
+/.git
+/.idea
+/.vscode
+/.claude
+/.env
+/.env.*
+/docs_and_ref
