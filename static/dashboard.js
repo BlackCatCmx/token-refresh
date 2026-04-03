@@ -76,21 +76,28 @@ async function loadSettings() {
     document.getElementById(field).disabled = false;
   }
   const lockMap = {
-    "request_identity.originator": "originator",
-    "request_identity.user_agent": "user-agent",
-    log_level: "log-level",
-    "logging.max_file_size": "max-file-size",
-    "proxy.mode": "proxy-mode",
-    "proxy.list": "proxy-list",
-    "credential_management.abnormal_threshold": "abnormal-threshold",
-    "refresh.lead_time": "lead-time",
-    "refresh.inter_refresh_delay_min": "delay-min",
-    "refresh.inter_refresh_delay_max": "delay-max",
-    "refresh.failure_backoff": "failure-backoff",
-    "network.timeout": "network-timeout",
+    "request_identity.originator": ["originator"],
+    "request_identity.user_agent_mode": ["user-agent-mode"],
+    "request_identity.user_agent": ["user-agent"],
+    "request_identity.user_agent_rules": ["user-agent-versions", "user-agent-profiles", "user-agent-terminals"],
+    "request_identity.user_agent_rules.versions": ["user-agent-versions"],
+    "request_identity.user_agent_rules.profiles": ["user-agent-profiles"],
+    "request_identity.user_agent_rules.terminals": ["user-agent-terminals"],
+    log_level: ["log-level"],
+    "logging.max_file_size": ["max-file-size"],
+    "proxy.mode": ["proxy-mode"],
+    "proxy.list": ["proxy-list"],
+    "credential_management.abnormal_threshold": ["abnormal-threshold"],
+    "refresh.lead_time": ["lead-time"],
+    "refresh.inter_refresh_delay_min": ["delay-min"],
+    "refresh.inter_refresh_delay_max": ["delay-max"],
+    "refresh.failure_backoff": ["failure-backoff"],
+    "network.timeout": ["network-timeout"],
   };
   for (const key of data.locked_fields) {
-    if (lockMap[key]) document.getElementById(lockMap[key]).disabled = true;
+    for (const fieldId of lockMap[key] || []) {
+      document.getElementById(fieldId).disabled = true;
+    }
   }
 }
 
