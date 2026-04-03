@@ -1,4 +1,4 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -13,132 +13,118 @@
       <div class="muted">上传凭证、查看状态、调参数、手动刷新、处理异常区都在这里。</div>
     </div>
     <div class="toolbar">
-      <button class="secondary" onclick="refreshAll()">刷新页面数据</button>
-      <button class="danger" onclick="logout()">退出</button>
+      <button type="button" class="secondary" onclick="refreshAll()">刷新页面数据</button>
+      <button type="button" class="danger" onclick="logout()">退出</button>
     </div>
   </header>
+  <nav class="tabs">
+    <button type="button" class="tab-btn active" data-tab="status" onclick="switchTab('status')">状态</button>
+    <button type="button" class="tab-btn" data-tab="credentials" onclick="switchTab('credentials')">凭证</button>
+    <button type="button" class="tab-btn" data-tab="settings" onclick="switchTab('settings')">设置</button>
+  </nav>
   <main>
-    <section>
-      <h2>调度状态</h2>
-      <div id="scheduler-status" class="status-grid">
-        <span class="status-label">加载中...</span>
-      </div>
-      <div class="toolbar" style="margin-top: 12px;">
-        <button onclick="schedulerAction('start')">开始自动刷新</button>
-        <button class="warn" onclick="schedulerAction('stop')">停止自动刷新</button>
-      </div>
-    </section>
-    <section>
-      <h2>导入与导出</h2>
-      <div class="grid">
-        <div>
-          <label>导入多个 JSON</label>
-          <input id="json-files" type="file" multiple accept=".json">
-          <button onclick="importJsonFiles()">上传 JSON</button>
+
+    <div id="tab-status" class="tab-panel">
+      <section>
+        <h2>调度状态</h2>
+        <div id="scheduler-status" class="status-grid">
+          <span class="status-label">加载中...</span>
         </div>
-        <div>
-          <label>导入 ZIP</label>
-          <input id="zip-file" type="file" accept=".zip">
-          <button onclick="importZipFile()">上传 ZIP</button>
+        <div class="toolbar toolbar-top">
+          <button type="button" onclick="schedulerAction('start')">开始自动刷新</button>
+          <button type="button" class="warn" onclick="schedulerAction('stop')">停止自动刷新</button>
         </div>
-      </div>
-      <div class="toolbar">
-        <button onclick="downloadCredentialArchive('normal')">下载正常区 ZIP</button>
-        <button onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
-        <button class="secondary" onclick="downloadCredentialArchive('all')">下载全部 ZIP</button>
-      </div>
-    </section>
-    <section>
-      <h2>请求头预览</h2>
-      <pre id="header-preview"></pre>
-    </section>
-    <section>
-      <h2>设置</h2>
-      <div class="grid">
-        <div><label>originator</label><input id="originator"></div>
-        <div><label>User-Agent</label><input id="user-agent"></div>
-        <div><label>日志级别</label><select id="log-level"><option value="info">info（最详细）</option><option value="warn">warn</option><option value="error">error</option></select></div>
-        <div><label>日志单文件上限</label><input id="max-file-size"></div>
-        <div><label>代理模式</label><select id="proxy-mode"><option value="fixed">fixed</option><option value="round_robin">round_robin</option></select></div>
-        <div><label>异常阈值</label><input id="abnormal-threshold" type="number" min="1"></div>
-        <div><label>提前刷新窗口</label><input id="lead-time"></div>
-        <div><label>刷新间最小延迟</label><input id="delay-min"></div>
-        <div><label>刷新间最大延迟</label><input id="delay-max"></div>
-        <div><label>失败退避</label><input id="failure-backoff"></div>
-        <div><label>网络超时</label><input id="network-timeout"></div>
-      </div>
-      <label>SOCKS5 代理列表</label>
-      <textarea id="proxy-list" placeholder="一行一个 socks5://ip:port"></textarea>
-      <div class="toolbar">
-        <button onclick="saveSettings()">保存设置</button>
-      </div>
-      <div id="settings-meta" class="muted"></div>
-    </section>
-    <section style="grid-column: 1 / -1;">
-      <h2>正常区凭证</h2>
-      <div class="toolbar">
-        <button class="danger" onclick="deleteSelected('normal')">删除选中</button>
-      </div>
-      <div class="list">
-        <table>
-          <thead>
-            <tr>
-              <th class="checkbox-cell"><input id="normal-select-all" type="checkbox" onchange="toggleAll('normal', this.checked)"></th>
-              <th>名称</th>
-              <th>邮箱</th>
-              <th>状态</th>
-              <th>最近刷新</th>
-              <th>过期时间</th>
-              <th>异常</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="normal-table"></tbody>
-        </table>
-      </div>
-    </section>
-    <section style="grid-column: 1 / -1;">
-      <h2>异常区凭证</h2>
-      <div class="toolbar">
-        <button class="danger" onclick="deleteSelected('abnormal')">删除选中</button>
-      </div>
-      <div class="list">
-        <table>
-          <thead>
-            <tr>
-              <th class="checkbox-cell"><input id="abnormal-select-all" type="checkbox" onchange="toggleAll('abnormal', this.checked)"></th>
-              <th>名称</th>
-              <th>邮箱</th>
-              <th>状态</th>
-              <th>最近刷新</th>
-              <th>过期时间</th>
-              <th>异常</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="abnormal-table"></tbody>
-        </table>
-      </div>
-    </section>
-    <section>
-      <h2>运行日志</h2>
-      <div class="toolbar">
-        <button onclick="reloadLog('runtime')">刷新</button>
-        <button onclick="downloadLog('runtime')">下载</button>
-        <button class="warn" onclick="clearLog('runtime')">清空</button>
-      </div>
-      <pre id="runtime-log"></pre>
-    </section>
-    <section>
-      <h2>审计日志</h2>
-      <div class="toolbar">
-        <button onclick="reloadLog('audit')">刷新</button>
-        <button onclick="downloadLog('audit')">下载</button>
-        <button class="warn" onclick="clearLog('audit')">清空</button>
-        <button class="secondary" onclick="downloadLog('all')">打包下载全部日志</button>
-      </div>
-      <pre id="audit-log"></pre>
-    </section>
+      </section>
+      <section>
+        <h2>请求头预览</h2>
+        <pre id="header-preview"></pre>
+      </section>
+      <section>
+        <h2>运行日志</h2>
+        <div class="toolbar">
+          <button type="button" onclick="reloadLog('runtime')">刷新</button>
+          <button type="button" onclick="downloadLog('runtime')">下载</button>
+          <button type="button" class="warn" onclick="clearLog('runtime')">清空</button>
+        </div>
+        <pre id="runtime-log"></pre>
+      </section>
+      <section>
+        <h2>审计日志</h2>
+        <div class="toolbar">
+          <button type="button" onclick="reloadLog('audit')">刷新</button>
+          <button type="button" onclick="downloadLog('audit')">下载</button>
+          <button type="button" class="warn" onclick="clearLog('audit')">清空</button>
+          <button type="button" class="secondary" onclick="downloadLog('all')">打包下载全部日志</button>
+        </div>
+        <pre id="audit-log"></pre>
+      </section>
+    </div>
+
+    <div id="tab-credentials" class="tab-panel hidden">
+      <section class="full-width">
+        <h2>导入与导出</h2>
+        <div class="import-row">
+          <input id="upload-files" type="file" multiple accept=".json,.zip">
+          <button type="button" onclick="importFiles()">上传</button>
+        </div>
+        <div class="toolbar toolbar-top">
+          <button type="button" onclick="downloadCredentialArchive('normal')">下载正常区 ZIP</button>
+          <button type="button" onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
+        </div>
+      </section>
+      <section class="full-width">
+        <div class="section-header">
+          <h2>正常区凭证</h2>
+          <div class="toolbar">
+            <label class="select-all-label">
+              <input id="normal-select-all" type="checkbox" onchange="toggleAll('normal', this.checked)">
+              全选
+            </label>
+            <button type="button" class="danger" onclick="deleteSelected('normal')">删除选中</button>
+          </div>
+        </div>
+        <div id="normal-cards" class="cred-grid"></div>
+      </section>
+      <section class="full-width">
+        <div class="section-header">
+          <h2>异常区凭证</h2>
+          <div class="toolbar">
+            <label class="select-all-label">
+              <input id="abnormal-select-all" type="checkbox" onchange="toggleAll('abnormal', this.checked)">
+              全选
+            </label>
+            <button type="button" class="danger" onclick="deleteSelected('abnormal')">删除选中</button>
+          </div>
+        </div>
+        <div id="abnormal-cards" class="cred-grid"></div>
+      </section>
+    </div>
+
+    <div id="tab-settings" class="tab-panel hidden">
+      <section>
+        <h2>设置</h2>
+        <div class="grid">
+          <div><label>originator</label><input type="text" id="originator"></div>
+          <div><label>User-Agent</label><input type="text" id="user-agent"></div>
+          <div><label>日志级别</label><select id="log-level"><option value="info">info（最详细）</option><option value="warn">warn</option><option value="error">error</option></select></div>
+          <div><label>日志单文件上限</label><input type="text" id="max-file-size"></div>
+          <div><label>代理模式</label><select id="proxy-mode"><option value="fixed">fixed</option><option value="round_robin">round_robin</option></select></div>
+          <div><label>异常阈值</label><input type="number" id="abnormal-threshold" min="1"></div>
+          <div><label>提前刷新窗口</label><input type="text" id="lead-time"></div>
+          <div><label>刷新间最小延迟</label><input type="text" id="delay-min"></div>
+          <div><label>刷新间最大延迟</label><input type="text" id="delay-max"></div>
+          <div><label>失败退避</label><input type="text" id="failure-backoff"></div>
+          <div><label>网络超时</label><input type="text" id="network-timeout"></div>
+        </div>
+        <label class="block-label">SOCKS5 代理列表</label>
+        <textarea id="proxy-list" placeholder="一行一个 socks5://ip:port"></textarea>
+        <div class="toolbar toolbar-top">
+          <button type="button" onclick="saveSettings()">保存设置</button>
+        </div>
+        <div id="settings-meta" class="muted"></div>
+      </section>
+    </div>
+
   </main>
   <script src="assets/dashboard.js" defer></script>
 </body>

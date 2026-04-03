@@ -29,11 +29,57 @@ h2 {
   font-size: 20px;
 }
 
+nav.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 22px;
+  border-bottom: 1px solid #d7d3ca;
+}
+
+.tab-btn {
+  background: transparent;
+  color: #62748a;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  padding: 8px 18px;
+  cursor: pointer;
+  font-size: inherit;
+  position: relative;
+  bottom: -1px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab-btn:hover {
+  background: #f1f5f9;
+  color: #1f2933;
+}
+
+.tab-btn.active {
+  background: white;
+  color: #163dff;
+  border-color: #d7d3ca;
+  font-weight: 600;
+}
+
 main {
+  padding: 0 22px 30px;
+}
+
+.tab-panel {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 16px;
-  padding: 0 22px 30px;
+  padding-top: 16px;
+}
+
+.tab-panel.hidden {
+  display: none;
+}
+
+.tab-panel .full-width {
+  grid-column: 1 / -1;
 }
 
 section {
@@ -49,6 +95,55 @@ section {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.toolbar-top {
+  margin-top: 12px;
+}
+
+.block-label {
+  margin-top: 10px;
+  display: block;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.section-header h2 {
+  margin: 0;
+}
+
+.section-header .toolbar {
+  margin-bottom: 0;
+}
+
+.select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #62748a;
+}
+
+.select-all-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.import-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.import-row input[type="file"] {
+  flex: 1;
+  min-width: 0;
 }
 
 button {
@@ -96,44 +191,85 @@ textarea {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
-.list {
-  max-height: 360px;
-  overflow: auto;
-  border: 1px solid #d7d3ca;
-  border-radius: 12px;
-  background: white;
+/* 凭证卡片 */
+.cred-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
 }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
+.cred-card {
+  background: #fafbfc;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cred-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-check {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.cred-name {
+  flex: 1;
+  font-weight: 600;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cred-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   font-size: 13px;
 }
 
-th,
-td {
-  padding: 10px;
-  border-bottom: 1px solid #eef2f6;
-  text-align: left;
-  vertical-align: top;
+.cred-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-th {
-  position: sticky;
-  top: 0;
-  background: #f8fafc;
+.cred-row span:last-child {
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 64%;
 }
 
-th.checkbox-cell,
-td.checkbox-cell {
-  width: 36px;
+.cred-error {
+  font-size: 12px;
+  color: #b42318;
+  word-break: break-all;
 }
 
-.row-check,
-#normal-select-all,
-#abnormal-select-all {
-  width: 18px;
-  height: 18px;
+.cred-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid #eef2f6;
+}
+
+.cred-card-actions button {
+  flex: 1;
+  min-width: 52px;
+  padding: 6px 8px;
+  font-size: 12px;
 }
 
 pre {
@@ -160,6 +296,12 @@ pre {
   border-radius: 999px;
   background: #e5f6f3;
   color: #0f766e;
+  white-space: nowrap;
+}
+
+.pill-warn {
+  background: #fff3cd;
+  color: #b45309;
 }
 
 .danger-text {
@@ -176,22 +318,6 @@ pre {
 
 .status-label {
   color: #62748a;
-  white-space: nowrap;
-}
-
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.actions button {
-  padding: 5px 10px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-td.nowrap {
   white-space: nowrap;
 }
 
@@ -235,6 +361,7 @@ textarea:disabled {
 
 @media (max-width: 720px) {
   header,
+  nav.tabs,
   main {
     padding-left: 14px;
     padding-right: 14px;
@@ -245,15 +372,14 @@ textarea:disabled {
     align-items: stretch;
   }
 
-  .list {
-    max-height: 300px;
+  .tab-btn {
+    padding: 7px 12px;
+    font-size: 13px;
   }
 
-  table {
-    font-size: 12px;
-  }
-
-  th, td {
-    padding: 6px;
+  .section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
   }
 }

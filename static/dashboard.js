@@ -126,31 +126,48 @@ async function saveSettings() {
 
 async function loadCredentials(zone) {
   const data = await api(`api/credentials?zone=${zone}`);
-  const tbody = document.getElementById(`${zone}-table`);
-  tbody.innerHTML = "";
+  const container = document.getElementById(`${zone}-cards`);
+  container.innerHTML = "";
   document.getElementById(`${zone}-select-all`).checked = false;
   if (data.items.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty-hint">暂无凭证</td></tr>`;
+    container.innerHTML = `<div class="empty-hint">暂无凭证</div>`;
     return;
   }
   for (const row of data.items) {
-    const tr = document.createElement("tr");
-    const status = row.zone === "abnormal" ? '<span class="pill">异常区</span>' : '<span class="pill">正常</span>';
-    const failure = row.last_failure_code ? `${row.last_failure_code} (${row.consecutive_failure_count})` : "-";
     const encodedName = encodeURIComponent(row.name);
+    const statusBadge = row.zone === "abnormal"
+      ? '<span class="pill pill-warn">异常区</span>'
+      : '<span class="pill">正常</span>';
+    const failure = row.last_failure_code
+      ? `<div class="cred-error">${escapeHtml(row.last_failure_code)} (${row.consecutive_failure_count})${row.last_failure_reason ? " — " + escapeHtml(row.last_failure_reason) : ""}</div>`
+      : "";
+    const parseErr = row.parse_error
+      ? `<div class="cred-error">${escapeHtml(row.parse_error)}</div>`
+      : "";
     const actions = zone === "normal"
-      ? `<div class="actions"><button onclick="manualRefresh('${encodedName}')">刷新</button><button class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button><button class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button></div>`
-      : `<div class="actions"><button onclick="restoreCredential('${encodedName}')">恢复</button><button class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button><button class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button></div>`;
-    tr.innerHTML = `
-      <td class="checkbox-cell"><input class="row-check" type="checkbox" data-zone="${zone}" data-name="${encodedName}" onchange="syncSelectAll('${zone}')"></td>
-      <td>${escapeHtml(row.name)}</td>
-      <td>${escapeHtml(row.email || "-")}</td>
-      <td>${status}</td>
-      <td class="nowrap">${escapeHtml(row.last_refresh ? shortTime(row.last_refresh) : "-")}</td>
-      <td class="nowrap">${escapeHtml(row.expired ? shortTime(row.expired) : "-")}</td>
-      <td>${escapeHtml(failure)}<div class="danger-text">${escapeHtml(row.parse_error || row.last_failure_reason || "")}</div></td>
-      <td>${actions}</td>`;
-    tbody.appendChild(tr);
+      ? `<button type="button" onclick="manualRefresh('${encodedName}')">刷新</button>
+         <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
+         <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`
+      : `<button type="button" onclick="restoreCredential('${encodedName}')">恢复</button>
+         <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
+         <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`;
+    const card = document.createElement("div");
+    card.className = "cred-card";
+    card.innerHTML = `
+      <div class="cred-card-top">
+        <input type="checkbox" class="row-check card-check" data-zone="${zone}" data-name="${encodedName}" onchange="syncSelectAll('${zone}')">
+        <span class="cred-name">${escapeHtml(row.name)}</span>
+        ${statusBadge}
+      </div>
+      <div class="cred-card-info">
+        <div class="cred-row"><span class="muted">邮箱</span><span>${escapeHtml(row.email || "—")}</span></div>
+        <div class="cred-row"><span class="muted">最近刷新</span><span>${escapeHtml(row.last_refresh ? shortTime(row.last_refresh) : "—")}</span></div>
+        <div class="cred-row"><span class="muted">过期时间</span><span>${escapeHtml(row.expired ? shortTime(row.expired) : "—")}</span></div>
+      </div>
+      ${failure}${parseErr}
+      <div class="cred-card-actions">${actions}</div>
+    `;
+    container.appendChild(card);
   }
 }
 
@@ -226,22 +243,29 @@ function downloadCredentialArchive(zone) {
   window.location.href = `api/credentials/archive.zip?zone=${zone}`;
 }
 
-async function importJsonFiles() {
-  const input = document.getElementById("json-files");
-  if (!input.files.length) return alert("请选择 JSON 文件");
-  const form = new FormData();
-  for (const file of input.files) form.append("files", file, file.name);
-  await api("api/credentials/import-json", { method: "POST", body: form });
-  input.value = "";
-  await refreshAll();
-}
-
-async function importZipFile() {
-  const input = document.getElementById("zip-file");
-  if (!input.files.length) return alert("请选择 ZIP 文件");
-  const form = new FormData();
-  form.append("file", input.files[0], input.files[0].name);
-  await api("api/credentials/import-zip", { method: "POST", body: form });
+async function importFiles() {
+  const input = document.getElementById("upload-files");
+  if (!input.files.length) return alert("请选择文件");
+  const files = Array.from(input.files);
+  const zips = files.filter((f) => f.name.toLowerCase().endsWith(".zip"));
+  const jsons = files.filter((f) => f.name.toLowerCase().endsWith(".json"));
+  if (zips.length > 0 && jsons.length > 0) {
+    return alert("请勿混合上传 JSON 和 ZIP 文件");
+  }
+  if (zips.length > 1) {
+    return alert("一次只能上传一个 ZIP 文件");
+  }
+  if (zips.length === 1) {
+    const form = new FormData();
+    form.append("file", zips[0], zips[0].name);
+    await api("api/credentials/import-zip", { method: "POST", body: form });
+  } else if (jsons.length > 0) {
+    const form = new FormData();
+    for (const f of jsons) form.append("files", f, f.name);
+    await api("api/credentials/import-json", { method: "POST", body: form });
+  } else {
+    return alert("请选择 .json 或 .zip 文件");
+  }
   input.value = "";
   await refreshAll();
 }
@@ -278,6 +302,15 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function switchTab(tabId) {
+  for (const panel of document.querySelectorAll(".tab-panel")) {
+    panel.classList.toggle("hidden", panel.id !== "tab-" + tabId);
+  }
+  for (const btn of document.querySelectorAll(".tab-btn")) {
+    btn.classList.toggle("active", btn.dataset.tab === tabId);
+  }
+}
+
 window.refreshAll = refreshAll;
 window.schedulerAction = schedulerAction;
 window.saveSettings = saveSettings;
@@ -287,14 +320,14 @@ window.deleteCredential = deleteCredential;
 window.deleteSelected = deleteSelected;
 window.downloadCredential = downloadCredential;
 window.downloadCredentialArchive = downloadCredentialArchive;
-window.importJsonFiles = importJsonFiles;
-window.importZipFile = importZipFile;
+window.importFiles = importFiles;
 window.reloadLog = reloadLog;
 window.downloadLog = downloadLog;
 window.clearLog = clearLog;
 window.logout = logout;
 window.toggleAll = toggleAll;
 window.syncSelectAll = syncSelectAll;
+window.switchTab = switchTab;
 
 document.addEventListener("DOMContentLoaded", () => {
   refreshAll().catch((error) => alert(error.message));
