@@ -211,10 +211,7 @@ pub fn random_preview_value(
     list: &str,
     rules: &UserAgentRulesConfig,
 ) -> Result<String> {
-    match parse_mode(mode)? {
-        UserAgentMode::List => assign_from_list_or_default(list),
-        UserAgentMode::Generated => pick_generated_candidate(originator.trim(), rules, true),
-    }
+    assign(originator, mode, list, rules)
 }
 
 fn preview_value_result(
