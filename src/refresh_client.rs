@@ -30,6 +30,7 @@ impl RefreshClient {
         &self,
         config: &AppConfig,
         refresh_token: &str,
+        user_agent: &str,
     ) -> std::result::Result<RefreshResponsePayload, RefreshFailure> {
         let client = self
             .build_client(config)
@@ -42,7 +43,7 @@ impl RefreshClient {
         );
         headers.insert(
             "user-agent",
-            HeaderValue::from_str(config.request_identity.user_agent.trim())
+            HeaderValue::from_str(user_agent.trim())
                 .map_err(|err| RefreshFailure::transient("invalid_user_agent", err.to_string()))?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

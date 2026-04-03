@@ -87,15 +87,21 @@ impl Default for LoggingConfig {
 pub struct RequestIdentityConfig {
     #[serde(default = "default_originator")]
     pub originator: String,
+    #[serde(default = "default_user_agent_mode")]
+    pub user_agent_mode: String,
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
+    #[serde(default)]
+    pub user_agent_rules: user_agent::UserAgentRulesConfig,
 }
 
 impl Default for RequestIdentityConfig {
     fn default() -> Self {
         Self {
             originator: default_originator(),
+            user_agent_mode: default_user_agent_mode(),
             user_agent: default_user_agent(),
+            user_agent_rules: user_agent::UserAgentRulesConfig::default(),
         }
     }
 }
@@ -288,9 +294,14 @@ impl ConfigManager {
         self.inner.read().await.web_password.clone()
     }
 
-    pub async fn header_preview(&self) -> BTreeMap<String, String> {
+    pub async fn header_preview(&self) -> Result<BTreeMap<String, String>> {
         let guard = self.inner.read().await;
         header_preview(&guard.effective_config)
+    }
+
+    pub async fn random_header_preview(&self) -> Result<BTreeMap<String, String>> {
+        let guard = self.inner.read().await;
+        random_header_preview(&guard.effective_config)
     }
 
     pub async fn update_settings(&self, settings: EditableSettings) -> Result<AppConfig> {
@@ -314,18 +325,42 @@ impl ConfigManager {
     }
 }
 
-pub fn header_preview(config: &AppConfig) -> BTreeMap<String, String> {
-    BTreeMap::from([
+pub fn header_preview(config: &AppConfig) -> Result<BTreeMap<String, String>> {
+    Ok(BTreeMap::from([
         ("Content-Type".to_string(), "application/json".to_string()),
         (
             "User-Agent".to_string(),
-            config.request_identity.user_agent.clone(),
+            user_agent::preview_value(
+                &config.request_identity.originator,
+                &config.request_identity.user_agent_mode,
+                &config.request_identity.user_agent,
+                &config.request_identity.user_agent_rules,
+            ),
         ),
         (
             "originator".to_string(),
             config.request_identity.originator.clone(),
         ),
-    ])
+    ]))
+}
+
+pub fn random_header_preview(config: &AppConfig) -> Result<BTreeMap<String, String>> {
+    Ok(BTreeMap::from([
+        ("Content-Type".to_string(), "application/json".to_string()),
+        (
+            "User-Agent".to_string(),
+            user_agent::random_preview_value(
+                &config.request_identity.originator,
+                &config.request_identity.user_agent_mode,
+                &config.request_identity.user_agent,
+                &config.request_identity.user_agent_rules,
+            )?,
+        ),
+        (
+            "originator".to_string(),
+            config.request_identity.originator.clone(),
+        ),
+    ]))
 }
 
 pub fn validate_config(config: &AppConfig) -> Result<()> {
@@ -334,7 +369,12 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
         bail!("invalid log_level: {}", config.log_level);
     }
     originator::validate(config.request_identity.originator.trim())?;
-    user_agent::validate(config.request_identity.user_agent.trim())?;
+    user_agent::validate_settings(
+        &config.request_identity.originator,
+        &config.request_identity.user_agent_mode,
+        &config.request_identity.user_agent,
+        &config.request_identity.user_agent_rules,
+    )?;
     if config.credential_management.abnormal_threshold == 0 {
         bail!("credential_management.abnormal_threshold must be >= 1");
     }
@@ -460,8 +500,14 @@ fn diff_editable_settings(current: &EditableSettings, incoming: &EditableSetting
     if current.request_identity.originator != incoming.request_identity.originator {
         changed.push("request_identity.originator".to_string());
     }
+    if current.request_identity.user_agent_mode != incoming.request_identity.user_agent_mode {
+        changed.push("request_identity.user_agent_mode".to_string());
+    }
     if current.request_identity.user_agent != incoming.request_identity.user_agent {
         changed.push("request_identity.user_agent".to_string());
+    }
+    if current.request_identity.user_agent_rules != incoming.request_identity.user_agent_rules {
+        changed.push("request_identity.user_agent_rules".to_string());
     }
     if current.proxy.mode != incoming.proxy.mode {
         changed.push("proxy.mode".to_string());
@@ -539,6 +585,10 @@ fn default_originator() -> String {
 
 fn default_user_agent() -> String {
     user_agent::DEFAULT_USER_AGENT.to_string()
+}
+
+fn default_user_agent_mode() -> String {
+    user_agent::DEFAULT_USER_AGENT_MODE.to_string()
 }
 
 fn default_proxy_mode() -> String {

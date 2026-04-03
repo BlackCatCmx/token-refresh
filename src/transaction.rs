@@ -123,9 +123,26 @@ impl RefreshTransaction {
             ),
         )?;
 
+        let request_user_agent =
+            match crate::user_agent::normalize_optional(credential.normalized_user_agent()) {
+                Ok(Some(value)) => value,
+                Ok(None) => crate::user_agent::DEFAULT_USER_AGENT.to_string(),
+                Err(err) => {
+                    return self
+                        .handle_failure(
+                            config,
+                            zone,
+                            key,
+                            trigger,
+                            RefreshFailure::deterministic("invalid_user_agent", err.to_string()),
+                        )
+                        .await;
+                }
+            };
+
         match self
             .client
-            .refresh(config, credential.refresh_token.trim())
+            .refresh(config, credential.refresh_token.trim(), &request_user_agent)
             .await
         {
             Ok(payload) => {

@@ -3,8 +3,10 @@ use std::io::{Cursor, Read};
 use anyhow::{Context, Result, bail};
 use zip::ZipArchive;
 
+use crate::config::RequestIdentityConfig;
 use crate::credential::CodexCredentialFile;
 use crate::credential_store::{CredentialStore, CredentialZone};
+use crate::user_agent;
 
 #[derive(Clone, Debug)]
 pub struct ImportedFile {
@@ -13,20 +15,42 @@ pub struct ImportedFile {
     pub zone: CredentialZone,
 }
 
-pub fn import_json_files(store: &CredentialStore, files: Vec<ImportedFile>) -> Result<Vec<String>> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserAgentPatchMode {
+    FillMissing,
+    ForceReassign,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UserAgentPatchSummary {
+    pub updated: usize,
+    pub unchanged: usize,
+    pub skipped_invalid: usize,
+}
+
+pub fn import_json_files(
+    store: &CredentialStore,
+    files: Vec<ImportedFile>,
+    request_identity: &RequestIdentityConfig,
+) -> Result<Vec<String>> {
     let mut imported = Vec::new();
     for file in files {
-        let credential: CodexCredentialFile = serde_json::from_slice(&file.bytes)
+        let mut credential: CodexCredentialFile = serde_json::from_slice(&file.bytes)
             .with_context(|| format!("invalid JSON credential: {}", file.name))?;
         if !credential.is_codex() {
             bail!("only type=codex credentials are supported: {}", file.name);
         }
+        ensure_user_agent(&mut credential, request_identity)?;
         imported.push(store.import_credential(file.zone, &file.name, &credential)?);
     }
     Ok(imported)
 }
 
-pub fn import_zip(store: &CredentialStore, bytes: &[u8]) -> Result<Vec<String>> {
+pub fn import_zip(
+    store: &CredentialStore,
+    bytes: &[u8],
+    request_identity: &RequestIdentityConfig,
+) -> Result<Vec<String>> {
     let cursor = Cursor::new(bytes);
     let mut archive = ZipArchive::new(cursor).context("invalid ZIP archive")?;
     let mut files = Vec::new();
@@ -62,7 +86,55 @@ pub fn import_zip(store: &CredentialStore, bytes: &[u8]) -> Result<Vec<String>> 
             zone,
         });
     }
-    import_json_files(store, files)
+    import_json_files(store, files, request_identity)
+}
+
+fn ensure_user_agent(
+    credential: &mut CodexCredentialFile,
+    request_identity: &RequestIdentityConfig,
+) -> Result<()> {
+    credential.user_agent = match user_agent::normalize_optional(credential.user_agent.as_deref())?
+    {
+        Some(value) => Some(value),
+        None => Some(user_agent::assign(
+            &request_identity.originator,
+            &request_identity.user_agent_mode,
+            &request_identity.user_agent,
+            &request_identity.user_agent_rules,
+        )?),
+    };
+    Ok(())
+}
+
+pub fn patch_user_agents(
+    store: &CredentialStore,
+    request_identity: &RequestIdentityConfig,
+    mode: UserAgentPatchMode,
+) -> Result<UserAgentPatchSummary> {
+    let mut summary = UserAgentPatchSummary::default();
+    for entry in store.scan_all()? {
+        let Some(mut credential) = entry.credential else {
+            summary.skipped_invalid += 1;
+            continue;
+        };
+        let should_update = match mode {
+            UserAgentPatchMode::FillMissing => credential.normalized_user_agent().is_none(),
+            UserAgentPatchMode::ForceReassign => true,
+        };
+        if !should_update {
+            summary.unchanged += 1;
+            continue;
+        }
+        credential.user_agent = Some(user_agent::assign(
+            &request_identity.originator,
+            &request_identity.user_agent_mode,
+            &request_identity.user_agent,
+            &request_identity.user_agent_rules,
+        )?);
+        store.write_credential(entry.zone, &entry.key, &credential)?;
+        summary.updated += 1;
+    }
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -70,7 +142,26 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, RequestIdentityConfig};
+
+    fn request_identity_with_list(user_agent: &str) -> RequestIdentityConfig {
+        RequestIdentityConfig {
+            user_agent: user_agent.to_string(),
+            ..RequestIdentityConfig::default()
+        }
+    }
+
+    fn generated_request_identity() -> RequestIdentityConfig {
+        RequestIdentityConfig {
+            user_agent_mode: "generated".to_string(),
+            user_agent_rules: crate::user_agent::UserAgentRulesConfig {
+                versions: "0.118.0".to_string(),
+                profiles: "windows10".to_string(),
+                terminals: "WindowsTerminal".to_string(),
+            },
+            ..RequestIdentityConfig::default()
+        }
+    }
 
     #[test]
     fn zip_import_respects_abnormal_prefix() {
@@ -100,7 +191,12 @@ mod tests {
             writer.write_all(credential.as_bytes()).unwrap();
             writer.finish().unwrap();
         }
-        let imported = import_zip(&store, cursor.get_ref()).unwrap();
+        let imported = import_zip(
+            &store,
+            cursor.get_ref(),
+            &request_identity_with_list(crate::user_agent::DEFAULT_USER_AGENT),
+        )
+        .unwrap();
         assert_eq!(imported, vec!["user@example.com.json".to_string()]);
         assert!(
             config
@@ -108,5 +204,223 @@ mod tests {
                 .join("user@example.com.json")
                 .exists()
         );
+    }
+
+    #[test]
+    fn json_import_assigns_default_user_agent_when_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+
+        let files = vec![ImportedFile {
+            name: "user@example.com.json".to_string(),
+            bytes: serde_json::json!({
+                "id_token": "",
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "email": "user@example.com",
+                "type": "codex"
+            })
+            .to_string()
+            .into_bytes(),
+            zone: CredentialZone::Normal,
+        }];
+
+        import_json_files(&store, files, &request_identity_with_list("")).unwrap();
+        let entry = store
+            .read_entry(CredentialZone::Normal, "user@example.com.json")
+            .unwrap();
+        assert_eq!(
+            entry
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_agent.as_deref()),
+            Some(crate::user_agent::DEFAULT_USER_AGENT)
+        );
+    }
+
+    #[test]
+    fn json_import_preserves_explicit_user_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+
+        let files = vec![ImportedFile {
+            name: "user@example.com.json".to_string(),
+            bytes: serde_json::json!({
+                "id_token": "",
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "email": "user@example.com",
+                "type": "codex",
+                "user-agent": "custom-ua"
+            })
+            .to_string()
+            .into_bytes(),
+            zone: CredentialZone::Normal,
+        }];
+
+        import_json_files(&store, files, &request_identity_with_list("pool-ua")).unwrap();
+        let entry = store
+            .read_entry(CredentialZone::Normal, "user@example.com.json")
+            .unwrap();
+        assert_eq!(
+            entry
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_agent.as_deref()),
+            Some("custom-ua")
+        );
+    }
+
+    #[test]
+    fn fill_missing_user_agents_only_updates_missing_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+
+        let missing = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            email: Some("missing@example.com".to_string()),
+            ..CodexCredentialFile::default()
+        };
+        let existing = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            email: Some("existing@example.com".to_string()),
+            user_agent: Some("keep-me".to_string()),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "missing.json", &missing)
+            .unwrap();
+        store
+            .write_credential(CredentialZone::Abnormal, "existing.json", &existing)
+            .unwrap();
+
+        let summary = patch_user_agents(
+            &store,
+            &request_identity_with_list("ua-pool"),
+            UserAgentPatchMode::FillMissing,
+        )
+        .unwrap();
+        assert_eq!(
+            summary,
+            UserAgentPatchSummary {
+                updated: 1,
+                unchanged: 1,
+                skipped_invalid: 0,
+            }
+        );
+        assert_eq!(
+            store
+                .read_entry(CredentialZone::Normal, "missing.json")
+                .unwrap()
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_agent.as_deref()),
+            Some("ua-pool")
+        );
+        assert_eq!(
+            store
+                .read_entry(CredentialZone::Abnormal, "existing.json")
+                .unwrap()
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_agent.as_deref()),
+            Some("keep-me")
+        );
+    }
+
+    #[test]
+    fn force_reassign_user_agents_overwrites_existing_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+
+        let credential = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            email: Some("user@example.com".to_string()),
+            user_agent: Some("old-ua".to_string()),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "user.json", &credential)
+            .unwrap();
+
+        let summary = patch_user_agents(
+            &store,
+            &request_identity_with_list("new-ua"),
+            UserAgentPatchMode::ForceReassign,
+        )
+        .unwrap();
+        assert_eq!(
+            summary,
+            UserAgentPatchSummary {
+                updated: 1,
+                unchanged: 0,
+                skipped_invalid: 0,
+            }
+        );
+        assert_eq!(
+            store
+                .read_entry(CredentialZone::Normal, "user.json")
+                .unwrap()
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_agent.as_deref()),
+            Some("new-ua")
+        );
+    }
+
+    #[test]
+    fn generated_mode_assigns_compliant_user_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+
+        let files = vec![ImportedFile {
+            name: "user@example.com.json".to_string(),
+            bytes: serde_json::json!({
+                "id_token": "",
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "email": "user@example.com",
+                "type": "codex"
+            })
+            .to_string()
+            .into_bytes(),
+            zone: CredentialZone::Normal,
+        }];
+
+        import_json_files(&store, files, &generated_request_identity()).unwrap();
+        let user_agent = store
+            .read_entry(CredentialZone::Normal, "user@example.com.json")
+            .unwrap()
+            .credential
+            .as_ref()
+            .and_then(|credential| credential.user_agent.as_deref())
+            .unwrap()
+            .to_string();
+        assert!(matches!(
+            user_agent.as_str(),
+            "codex_cli_rs/0.118.0 (Windows 10.0.19044; x86_64) WindowsTerminal"
+                | "codex_cli_rs/0.118.0 (Windows 10.0.19045; x86_64) WindowsTerminal"
+        ));
     }
 }

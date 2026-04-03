@@ -27,6 +27,8 @@ pub struct CodexCredentialFile {
     pub expired: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(rename = "user-agent", default)]
+    pub user_agent: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -66,6 +68,13 @@ impl CodexCredentialFile {
 
     pub fn set_expired_at(&mut self, value: DateTime<Utc>) {
         self.expired = Some(value.to_rfc3339());
+    }
+
+    pub fn normalized_user_agent(&self) -> Option<&str> {
+        self.user_agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
     }
 
     pub fn apply_id_token_metadata(&mut self, token: &str) -> Result<()> {
@@ -108,5 +117,23 @@ mod tests {
         );
         let written = serde_json::to_value(&credential).unwrap();
         assert_eq!(written.get("nested"), raw.get("nested"));
+    }
+
+    #[test]
+    fn round_trips_user_agent_field() {
+        let raw = serde_json::json!({
+            "id_token": "id",
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "type": "codex",
+            "user-agent": "ua-test"
+        });
+        let credential: CodexCredentialFile = serde_json::from_value(raw).unwrap();
+        assert_eq!(credential.user_agent.as_deref(), Some("ua-test"));
+        let written = serde_json::to_value(&credential).unwrap();
+        assert_eq!(
+            written.get("user-agent").and_then(|value| value.as_str()),
+            Some("ua-test")
+        );
     }
 }

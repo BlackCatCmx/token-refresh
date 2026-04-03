@@ -29,6 +29,7 @@ pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
     file.sync_all()
         .with_context(|| format!("failed to sync temp file {}", temp_path.display()))?;
+    drop(file);
     replace_file(&temp_path, path)?;
     sync_dir(parent)?;
     Ok(())
@@ -143,5 +144,22 @@ fn sync_dir(path: &Path) -> Result<()> {
             "directory {} does not exist",
             path.display()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_bytes_can_replace_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sample.json");
+
+        atomic_write_bytes(&path, br#"{"value":1}"#).unwrap();
+        atomic_write_bytes(&path, br#"{"value":2}"#).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, r#"{"value":2}"#);
     }
 }

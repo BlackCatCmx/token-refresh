@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::archive;
 use crate::config::{EditableSettings, parse_byte_size_str};
 use crate::credential_store::{CredentialStore, CredentialZone};
-use crate::import::{ImportedFile, import_json_files, import_zip};
+use crate::import::{
+    ImportedFile, UserAgentPatchMode, UserAgentPatchSummary, import_json_files, import_zip,
+    patch_user_agents,
+};
 use crate::logging::LogKind;
 use crate::web::{AppState, app_css, dashboard_js, dashboard_page, login_js, login_page};
 
@@ -28,6 +31,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(import_json_credentials),
         )
         .route("/api/credentials/import-zip", post(import_zip_credentials))
+        .route(
+            "/api/credentials/user-agent/fill-missing",
+            post(fill_missing_credential_user_agents),
+        )
+        .route(
+            "/api/credentials/user-agent/reassign",
+            post(reassign_credential_user_agents),
+        )
         .route("/api/credentials/refresh", post(refresh_credential))
         .route("/api/credentials/restore", post(restore_credentials))
         .route("/api/credentials/delete", post(delete_credentials))
@@ -42,6 +53,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/logs", get(get_logs))
         .route("/api/logs/download", get(download_logs))
         .route("/api/logs/clear", post(clear_logs))
+        .route(
+            "/api/settings/header-preview",
+            get(get_random_header_preview),
+        )
         .route("/api/settings", get(get_settings).put(update_settings))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -230,9 +245,14 @@ async fn import_json_credentials(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Response {
+    let user_agent_list = state
+        .config_manager
+        .effective_config()
+        .await
+        .request_identity;
     match collect_json_files(&mut multipart)
         .await
-        .and_then(|files| import_json_files(&state.store, files))
+        .and_then(|files| import_json_files(&state.store, files, &user_agent_list))
     {
         Ok(imported) => {
             let _ = state.logger.runtime(
@@ -277,13 +297,18 @@ async fn import_zip_credentials(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Response {
+    let user_agent_list = state
+        .config_manager
+        .effective_config()
+        .await
+        .request_identity;
     let field = match multipart.next_field().await {
         Ok(Some(field)) => field,
         Ok(None) => return json_error(StatusCode::BAD_REQUEST, "未上传 ZIP 文件"),
         Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     };
     match field.bytes().await.context("failed to read uploaded ZIP") {
-        Ok(bytes) => match import_zip(&state.store, &bytes) {
+        Ok(bytes) => match import_zip(&state.store, &bytes, &user_agent_list) {
             Ok(imported) => {
                 let _ = state.logger.runtime(
                     "info",
@@ -294,6 +319,56 @@ async fn import_zip_credentials(
             }
             Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
         },
+        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct UserAgentPatchResponse {
+    updated: usize,
+    unchanged: usize,
+    skipped_invalid: usize,
+}
+
+async fn fill_missing_credential_user_agents(State(state): State<Arc<AppState>>) -> Response {
+    patch_credential_user_agents(state, UserAgentPatchMode::FillMissing).await
+}
+
+async fn reassign_credential_user_agents(State(state): State<Arc<AppState>>) -> Response {
+    patch_credential_user_agents(state, UserAgentPatchMode::ForceReassign).await
+}
+
+async fn patch_credential_user_agents(state: Arc<AppState>, mode: UserAgentPatchMode) -> Response {
+    let user_agent_list = state
+        .config_manager
+        .effective_config()
+        .await
+        .request_identity;
+    match patch_user_agents(&state.store, &user_agent_list, mode) {
+        Ok(UserAgentPatchSummary {
+            updated,
+            unchanged,
+            skipped_invalid,
+        }) => {
+            let action = match mode {
+                UserAgentPatchMode::FillMissing => "filled missing credential user agents",
+                UserAgentPatchMode::ForceReassign => "reassigned credential user agents",
+            };
+            let _ = state.logger.runtime(
+                "info",
+                format!(
+                    "{} (updated={}, unchanged={}, skipped_invalid={})",
+                    action, updated, unchanged, skipped_invalid
+                ),
+            );
+            state.scheduler.wake();
+            Json(UserAgentPatchResponse {
+                updated,
+                unchanged,
+                skipped_invalid,
+            })
+            .into_response()
+        }
         Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     }
 }
@@ -599,18 +674,33 @@ async fn get_settings(State(state): State<Arc<AppState>>) -> Response {
         .into_iter()
         .collect();
     locked_fields.sort();
-    Json(SettingsResponse {
-        settings: state.config_manager.editable_settings().await,
-        header_preview: state.config_manager.header_preview().await,
-        locked_fields,
-        config_path: state
-            .config_manager
-            .config_path()
-            .await
-            .display()
-            .to_string(),
-    })
-    .into_response()
+    match state.config_manager.header_preview().await {
+        Ok(header_preview) => Json(SettingsResponse {
+            settings: state.config_manager.editable_settings().await,
+            header_preview,
+            locked_fields,
+            config_path: state
+                .config_manager
+                .config_path()
+                .await
+                .display()
+                .to_string(),
+        })
+        .into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct HeaderPreviewResponse {
+    header_preview: BTreeMap<String, String>,
+}
+
+async fn get_random_header_preview(State(state): State<Arc<AppState>>) -> Response {
+    match state.config_manager.random_header_preview().await {
+        Ok(header_preview) => Json(HeaderPreviewResponse { header_preview }).into_response(),
+        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    }
 }
 
 async fn update_settings(

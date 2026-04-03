@@ -54,7 +54,11 @@ async function schedulerAction(action) {
 async function loadSettings() {
   const data = await api("api/settings");
   document.getElementById("originator").value = data.settings.request_identity.originator;
+  document.getElementById("user-agent-mode").value = data.settings.request_identity.user_agent_mode;
   document.getElementById("user-agent").value = data.settings.request_identity.user_agent;
+  document.getElementById("user-agent-versions").value = data.settings.request_identity.user_agent_rules.versions;
+  document.getElementById("user-agent-profiles").value = data.settings.request_identity.user_agent_rules.profiles;
+  document.getElementById("user-agent-terminals").value = data.settings.request_identity.user_agent_rules.terminals;
   document.getElementById("log-level").value = data.settings.log_level;
   document.getElementById("max-file-size").value = data.settings.logging.max_file_size;
   document.getElementById("proxy-mode").value = data.settings.proxy.mode;
@@ -65,9 +69,10 @@ async function loadSettings() {
   document.getElementById("delay-max").value = data.settings.refresh.inter_refresh_delay_max;
   document.getElementById("failure-backoff").value = data.settings.refresh.failure_backoff;
   document.getElementById("network-timeout").value = data.settings.network.timeout;
-  document.getElementById("header-preview").textContent = JSON.stringify(data.header_preview, null, 2);
+  syncUserAgentMode();
+  renderHeaderPreview(data.header_preview);
   document.getElementById("settings-meta").textContent = `配置文件: ${data.config_path} | 环境变量锁定项: ${data.locked_fields.join(", ") || "无"}`;
-  for (const field of ["originator", "user-agent", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "lead-time", "delay-min", "delay-max", "failure-backoff", "network-timeout"]) {
+  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "lead-time", "delay-min", "delay-max", "failure-backoff", "network-timeout"]) {
     document.getElementById(field).disabled = false;
   }
   const lockMap = {
@@ -89,13 +94,39 @@ async function loadSettings() {
   }
 }
 
+function renderHeaderPreview(value) {
+  document.getElementById("header-preview").textContent = JSON.stringify(value, null, 2);
+}
+
+function syncUserAgentMode() {
+  const listMode = document.getElementById("user-agent-mode").value === "list";
+  document.getElementById("user-agent-list-group").hidden = !listMode;
+  document.getElementById("user-agent-versions-group").hidden = listMode;
+  document.getElementById("user-agent-profiles-group").hidden = listMode;
+  document.getElementById("user-agent-terminals-group").hidden = listMode;
+  document.getElementById("user-agent-mode-hint").textContent = listMode
+    ? "list 模式：直接从手写 UA 列表里抽一条。"
+    : "generated 模式：按版本、系统档案和终端白名单组合出合规 UA。";
+}
+
+async function refreshHeaderPreview() {
+  const data = await api("api/settings/header-preview");
+  renderHeaderPreview(data.header_preview);
+}
+
 async function saveSettings() {
   const payload = {
     log_level: document.getElementById("log-level").value,
     logging: { max_file_size: document.getElementById("max-file-size").value },
     request_identity: {
       originator: document.getElementById("originator").value,
+      user_agent_mode: document.getElementById("user-agent-mode").value,
       user_agent: document.getElementById("user-agent").value,
+      user_agent_rules: {
+        versions: document.getElementById("user-agent-versions").value,
+        profiles: document.getElementById("user-agent-profiles").value,
+        terminals: document.getElementById("user-agent-terminals").value,
+      },
     },
     proxy: {
       mode: document.getElementById("proxy-mode").value,
@@ -270,6 +301,24 @@ async function importFiles() {
   await refreshAll();
 }
 
+function formatUserAgentPatchMessage(actionLabel, data) {
+  return `${actionLabel}完成：已更新 ${data.updated} 个，未改动 ${data.unchanged} 个，跳过损坏凭证 ${data.skipped_invalid} 个`;
+}
+
+async function fillMissingUserAgents() {
+  if (!confirm("只给缺少 UA 的凭证补充，已有 UA 的不改。确认继续吗？")) return;
+  const data = await api("api/credentials/user-agent/fill-missing", { method: "POST" });
+  await refreshAll();
+  alert(formatUserAgentPatchMessage("补充 UA", data));
+}
+
+async function reassignAllUserAgents() {
+  if (!confirm("这会强制重写全部凭证的 UA，包括原来已有 UA 的。确认继续吗？")) return;
+  const data = await api("api/credentials/user-agent/reassign", { method: "POST" });
+  await refreshAll();
+  alert(formatUserAgentPatchMessage("强制重配 UA", data));
+}
+
 async function reloadLog(kind) {
   const data = await api(`api/logs?kind=${kind}&limit=120`);
   document.getElementById(`${kind}-log`).textContent = data.content || "";
@@ -312,8 +361,10 @@ function switchTab(tabId) {
 }
 
 window.refreshAll = refreshAll;
+window.refreshHeaderPreview = refreshHeaderPreview;
 window.schedulerAction = schedulerAction;
 window.saveSettings = saveSettings;
+window.syncUserAgentMode = syncUserAgentMode;
 window.manualRefresh = manualRefresh;
 window.restoreCredential = restoreCredential;
 window.deleteCredential = deleteCredential;
@@ -321,6 +372,8 @@ window.deleteSelected = deleteSelected;
 window.downloadCredential = downloadCredential;
 window.downloadCredentialArchive = downloadCredentialArchive;
 window.importFiles = importFiles;
+window.fillMissingUserAgents = fillMissingUserAgents;
+window.reassignAllUserAgents = reassignAllUserAgents;
 window.reloadLog = reloadLog;
 window.downloadLog = downloadLog;
 window.clearLog = clearLog;
