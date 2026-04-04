@@ -31,7 +31,9 @@ pub struct SchedulerStatus {
     pub manual_failed_count: usize,
     pub manual_last_started_at: Option<String>,
     pub manual_last_finished_at: Option<String>,
-    pub manual_last_error: Option<String>,
+    pub manual_last_item_error_key: Option<String>,
+    pub manual_last_item_error: Option<String>,
+    pub manual_last_run_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -44,6 +46,7 @@ pub struct SchedulerHandle {
     backoff_until: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
 }
 
+#[derive(Clone)]
 struct SchedulerRuntime {
     config_manager: ConfigManager,
     store: Arc<CredentialStore>,
@@ -95,7 +98,24 @@ impl SchedulerHandle {
             backoff_until: self.backoff_until.clone(),
         };
         tokio::spawn(async move {
-            runtime.run().await;
+            loop {
+                let worker = runtime.clone();
+                match tokio::spawn(async move { worker.run().await }).await {
+                    Ok(()) => break,
+                    Err(err) if err.is_cancelled() => break,
+                    Err(err) => {
+                        let message = err.to_string();
+                        let _ = runtime.logger.runtime(
+                            "error",
+                            format!(
+                                "scheduler background task panicked and will restart: {message}"
+                            ),
+                        );
+                        runtime.recover_after_worker_panic(&message).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
         });
     }
 
@@ -135,7 +155,9 @@ impl SchedulerHandle {
         {
             let mut status = self.status.write().await;
             status.manual_pending = true;
-            status.manual_last_error = None;
+            status.manual_last_item_error_key = None;
+            status.manual_last_item_error = None;
+            status.manual_last_run_error = None;
         }
         self.notify.notify_waiters();
         Ok(())
@@ -160,7 +182,7 @@ impl SchedulerRuntime {
                     status.manual_pending = false;
                     status.manual_running = false;
                     status.manual_current_key = None;
-                    status.manual_last_error = Some(err.to_string());
+                    status.manual_last_run_error = Some(err.to_string());
                     status.manual_last_finished_at = Some(Utc::now().to_rfc3339());
                 }
                 continue;
@@ -302,7 +324,9 @@ impl SchedulerRuntime {
             status.manual_failed_count = 0;
             status.manual_last_started_at = Some(Utc::now().to_rfc3339());
             status.manual_last_finished_at = None;
-            status.manual_last_error = None;
+            status.manual_last_item_error_key = None;
+            status.manual_last_item_error = None;
+            status.manual_last_run_error = None;
         }
         let _ = self.logger.runtime(
             "info",
@@ -347,10 +371,11 @@ impl SchedulerRuntime {
                     status.manual_processed_count += 1;
                     status.manual_failed_count += 1;
                     status.manual_current_key = None;
-                    status.manual_last_error = Some(err.to_string());
+                    status.manual_last_item_error_key = Some(key.clone());
+                    status.manual_last_item_error = Some(err.to_string());
                 }
             }
-            if index + 1 >= keys.len() {
+            if index + 1 == keys.len() {
                 continue;
             }
             let delay = random_delay(min_delay, max_delay);
@@ -364,19 +389,36 @@ impl SchedulerRuntime {
             status.manual_running = false;
             status.manual_current_key = None;
             status.manual_last_finished_at = Some(Utc::now().to_rfc3339());
+            let _ = self.logger.runtime(
+                "info",
+                format!(
+                    "manual full refresh finished (total={}, processed={}, success={}, failed={})",
+                    status.manual_total_count,
+                    status.manual_processed_count,
+                    status.manual_success_count,
+                    status.manual_failed_count
+                ),
+            );
         }
-        let status = self.status.read().await.clone();
-        let _ = self.logger.runtime(
-            "info",
-            format!(
-                "manual full refresh finished (total={}, processed={}, success={}, failed={})",
-                status.manual_total_count,
-                status.manual_processed_count,
-                status.manual_success_count,
-                status.manual_failed_count
-            ),
-        );
         Ok(())
+    }
+
+    async fn recover_after_worker_panic(&self, error: &str) {
+        self.manual_busy.store(false, Ordering::SeqCst);
+        self.manual_requested.store(false, Ordering::SeqCst);
+        let now = Utc::now().to_rfc3339();
+        let mut status = self.status.write().await;
+        let had_manual_activity = status.manual_pending || status.manual_running;
+        status.current_key = None;
+        status.next_wake_at = None;
+        status.last_error = Some(format!("scheduler runtime panicked and restarted: {error}"));
+        if had_manual_activity {
+            status.manual_pending = false;
+            status.manual_running = false;
+            status.manual_current_key = None;
+            status.manual_last_run_error = Some(format!("手动全量刷新因调度器异常中断: {error}"));
+            status.manual_last_finished_at = Some(now);
+        }
     }
 
     async fn update_backoff(

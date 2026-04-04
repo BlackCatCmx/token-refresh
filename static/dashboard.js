@@ -36,6 +36,9 @@ async function loadScheduler() {
   const manualStateClass = data.manual_running || data.manual_pending ? "status-on" : "status-off";
   const manualProgress = `${data.manual_processed_count ?? 0}/${data.manual_total_count ?? 0}`;
   const manualSummary = `成功 ${data.manual_success_count ?? 0} / 失败 ${data.manual_failed_count ?? 0}`;
+  const manualLastItemError = data.manual_last_item_error
+    ? `${data.manual_last_item_error_key || "未知账号"}: ${data.manual_last_item_error}`
+    : "无";
   container.innerHTML = `
     <span class="status-label">自动刷新</span>
     <span class="${data.enabled ? "status-on" : "status-off"}">${data.enabled ? "运行中" : "已停止"}</span>
@@ -57,8 +60,10 @@ async function loadScheduler() {
     <span>${escapeHtml(data.manual_last_started_at ? shortTime(data.manual_last_started_at) : "未运行")}</span>
     <span class="status-label">最近结束时间</span>
     <span>${escapeHtml(data.manual_last_finished_at ? shortTime(data.manual_last_finished_at) : "未完成")}</span>
-    <span class="status-label">手动最近错误</span>
-    <span${data.manual_last_error ? ' class="danger-text"' : ""}>${escapeHtml(data.manual_last_error || "无")}</span>
+    <span class="status-label">手动最近账号异常</span>
+    <span${data.manual_last_item_error ? ' class="danger-text"' : ""}>${escapeHtml(manualLastItemError)}</span>
+    <span class="status-label">手动流程异常</span>
+    <span${data.manual_last_run_error ? ' class="danger-text"' : ""}>${escapeHtml(data.manual_last_run_error || "无")}</span>
   `;
   const manualBtn = document.getElementById("manual-refresh-all-btn");
   const manualBusy = Boolean(data.manual_pending || data.manual_running);
