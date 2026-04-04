@@ -188,9 +188,11 @@ async function loadCredentials(zone) {
       : "";
     const actions = zone === "normal"
       ? `<button type="button" onclick="manualRefresh('${encodedName}')">刷新</button>
+         <button type="button" class="secondary" onclick="openCredentialEditor('${zone}','${encodedName}')">编辑</button>
          <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
          <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`
       : `<button type="button" onclick="restoreCredential('${encodedName}')">恢复</button>
+         <button type="button" class="secondary" onclick="openCredentialEditor('${zone}','${encodedName}')">编辑</button>
          <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
          <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`;
     const card = document.createElement("div");
@@ -275,6 +277,59 @@ async function deleteSelected(zone) {
     body: JSON.stringify({ zone, names }),
   });
   await refreshAll();
+}
+
+const credentialEditorState = {
+  zone: null,
+  name: null,
+};
+
+async function openCredentialEditor(zone, name) {
+  try {
+    const decodedName = decodeURIComponent(name);
+    const data = await api(`api/credentials/content?zone=${zone}&name=${encodeURIComponent(decodedName)}`);
+    credentialEditorState.zone = zone;
+    credentialEditorState.name = decodedName;
+    document.getElementById("credential-editor-meta").textContent = `${zone === "normal" ? "正常区" : "异常区"} / ${decodedName}`;
+    document.getElementById("credential-editor-content").value = data.content;
+    const modal = document.getElementById("credential-editor-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    document.body.classList.add("modal-open");
+    document.getElementById("credential-editor-content").focus();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function closeCredentialEditor() {
+  credentialEditorState.zone = null;
+  credentialEditorState.name = null;
+  document.getElementById("credential-editor-content").value = "";
+  const modal = document.getElementById("credential-editor-modal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+async function saveCredentialEditor() {
+  if (!credentialEditorState.zone || !credentialEditorState.name) return;
+  try {
+    await api("api/credentials/content", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        zone: credentialEditorState.zone,
+        name: credentialEditorState.name,
+        content: document.getElementById("credential-editor-content").value,
+      }),
+    });
+    closeCredentialEditor();
+    await refreshAll();
+    alert("凭证已保存");
+  } catch (error) {
+    alert(error.message);
+  }
 }
 
 function downloadCredential(zone, name) {
@@ -382,6 +437,9 @@ window.deleteCredential = deleteCredential;
 window.deleteSelected = deleteSelected;
 window.downloadCredential = downloadCredential;
 window.downloadCredentialArchive = downloadCredentialArchive;
+window.openCredentialEditor = openCredentialEditor;
+window.closeCredentialEditor = closeCredentialEditor;
+window.saveCredentialEditor = saveCredentialEditor;
 window.importFiles = importFiles;
 window.fillMissingUserAgents = fillMissingUserAgents;
 window.reassignAllUserAgents = reassignAllUserAgents;
@@ -395,4 +453,10 @@ window.switchTab = switchTab;
 
 document.addEventListener("DOMContentLoaded", () => {
   refreshAll().catch((error) => alert(error.message));
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !document.getElementById("credential-editor-modal").classList.contains("hidden")) {
+    closeCredentialEditor();
+  }
 });

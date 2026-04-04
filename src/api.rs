@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive;
 use crate::config::{EditableSettings, parse_byte_size_str};
+use crate::credential::CodexCredentialFile;
 use crate::credential_store::{CredentialStore, CredentialZone};
 use crate::import::{
     ImportedFile, UserAgentPatchMode, UserAgentPatchSummary, import_json_files, import_zip,
@@ -42,6 +43,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/credentials/refresh", post(refresh_credential))
         .route("/api/credentials/restore", post(restore_credentials))
         .route("/api/credentials/delete", post(delete_credentials))
+        .route(
+            "/api/credentials/content",
+            get(get_credential_content).put(update_credential_content),
+        )
         .route("/api/credentials/download", get(download_credential))
         .route(
             "/api/credentials/archive.zip",
@@ -501,6 +506,76 @@ struct DownloadCredentialQuery {
     name: String,
 }
 
+#[derive(Debug, Serialize)]
+struct CredentialContentResponse {
+    zone: String,
+    name: String,
+    content: String,
+}
+
+async fn get_credential_content(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DownloadCredentialQuery>,
+) -> Response {
+    let zone = match CredentialZone::parse(query.zone.trim()) {
+        Ok(zone) => zone,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    };
+    match state.store.read_bytes(zone, query.name.trim()) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(content) => Json(CredentialContentResponse {
+                zone: zone.as_str().to_string(),
+                name: query.name.trim().to_string(),
+                content,
+            })
+            .into_response(),
+            Err(err) => json_error(StatusCode::BAD_REQUEST, &format!("凭证文件不是有效 UTF-8: {err}")),
+        },
+        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateCredentialContentRequest {
+    zone: String,
+    name: String,
+    content: String,
+}
+
+async fn update_credential_content(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateCredentialContentRequest>,
+) -> Response {
+    let zone = match CredentialZone::parse(payload.zone.trim()) {
+        Ok(zone) => zone,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    };
+    if let Err(err) = validate_credential_content(&payload.content) {
+        return json_error(StatusCode::BAD_REQUEST, &err.to_string());
+    }
+    match state
+        .store
+        .write_bytes(zone, payload.name.trim(), payload.content.as_bytes())
+    {
+        Ok(_) => {
+            let _ = state.logger.runtime(
+                "info",
+                format!(
+                    "credential content updated for {} in {} zone",
+                    payload.name.trim(),
+                    zone.as_str()
+                ),
+            );
+            state.scheduler.wake();
+            Json(SimpleMessage {
+                message: "凭证已保存".to_string(),
+            })
+            .into_response()
+        }
+        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    }
+}
+
 async fn download_credential(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DownloadCredentialQuery>,
@@ -773,4 +848,36 @@ fn download_response(content_type: &str, file_name: impl Into<String>, bytes: Ve
             .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
     );
     (StatusCode::OK, headers, bytes).into_response()
+}
+
+fn validate_credential_content(content: &str) -> Result<()> {
+    let credential: CodexCredentialFile =
+        serde_json::from_str(content).context("JSON 格式错误")?;
+    if !credential.is_codex() {
+        anyhow::bail!("只允许保存 type 为 codex 的凭证文件");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_credential_content_accepts_valid_codex_json() {
+        let raw = r#"{"type":"codex","access_token":"a","refresh_token":"b"}"#;
+        assert!(validate_credential_content(raw).is_ok());
+    }
+
+    #[test]
+    fn validate_credential_content_rejects_invalid_json() {
+        let raw = r#"{"type":"codex","access_token":"a""#;
+        assert!(validate_credential_content(raw).is_err());
+    }
+
+    #[test]
+    fn validate_credential_content_rejects_non_codex_json() {
+        let raw = r#"{"type":"other","access_token":"a","refresh_token":"b"}"#;
+        assert!(validate_credential_content(raw).is_err());
+    }
 }

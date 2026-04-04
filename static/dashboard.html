@@ -161,6 +161,24 @@
     </div>
 
   </main>
+
+  <div id="credential-editor-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" onclick="closeCredentialEditor()"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-editor-title">
+      <div class="modal-header">
+        <div>
+          <h2 id="credential-editor-title">编辑凭证</h2>
+          <div id="credential-editor-meta" class="muted"></div>
+        </div>
+        <button type="button" class="secondary" onclick="closeCredentialEditor()">取消</button>
+      </div>
+      <textarea id="credential-editor-content" class="modal-textarea" spellcheck="false" placeholder="在这里编辑 JSON 内容"></textarea>
+      <div class="toolbar toolbar-top">
+        <button type="button" onclick="saveCredentialEditor()">保存</button>
+        <button type="button" class="secondary" onclick="closeCredentialEditor()">取消</button>
+      </div>
+    </div>
+  </div>
   </div><!-- /.page-wrap -->
   <script src="assets/dashboard.js" defer></script>
 </body>

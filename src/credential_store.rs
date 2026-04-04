@@ -180,6 +180,12 @@ impl CredentialStore {
         Ok(path)
     }
 
+    pub fn write_bytes(&self, zone: CredentialZone, key: &str, bytes: &[u8]) -> Result<PathBuf> {
+        let path = self.key_to_path(zone, key)?;
+        fsutil::atomic_write_bytes(&path, bytes)?;
+        Ok(path)
+    }
+
     pub fn import_credential(
         &self,
         zone: CredentialZone,
@@ -460,5 +466,21 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn write_bytes_preserves_raw_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let raw = br#"{"type":"codex","access_token":"a","refresh_token":"b","custom":{"x":1}}"#;
+
+        let path = store
+            .write_bytes(CredentialZone::Normal, "user@example.com.json", raw)
+            .unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), raw);
     }
 }
