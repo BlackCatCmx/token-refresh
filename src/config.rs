@@ -151,6 +151,10 @@ pub struct RefreshConfig {
     pub inter_refresh_delay_min: String,
     #[serde(default = "default_inter_refresh_delay_max")]
     pub inter_refresh_delay_max: String,
+    #[serde(default = "default_manual_inter_refresh_delay_min")]
+    pub manual_inter_refresh_delay_min: String,
+    #[serde(default = "default_manual_inter_refresh_delay_max")]
+    pub manual_inter_refresh_delay_max: String,
     #[serde(default = "default_failure_backoff")]
     pub failure_backoff: String,
 }
@@ -164,6 +168,8 @@ impl Default for RefreshConfig {
             max_sleep: default_max_sleep(),
             inter_refresh_delay_min: default_inter_refresh_delay_min(),
             inter_refresh_delay_max: default_inter_refresh_delay_max(),
+            manual_inter_refresh_delay_min: default_manual_inter_refresh_delay_min(),
+            manual_inter_refresh_delay_max: default_manual_inter_refresh_delay_max(),
             failure_backoff: default_failure_backoff(),
         }
     }
@@ -217,6 +223,8 @@ pub struct EditableRefreshConfig {
     pub lead_time: String,
     pub inter_refresh_delay_min: String,
     pub inter_refresh_delay_max: String,
+    pub manual_inter_refresh_delay_min: String,
+    pub manual_inter_refresh_delay_max: String,
     pub failure_backoff: String,
 }
 
@@ -233,6 +241,14 @@ impl From<&AppConfig> for EditableSettings {
                 lead_time: value.refresh.lead_time.clone(),
                 inter_refresh_delay_min: value.refresh.inter_refresh_delay_min.clone(),
                 inter_refresh_delay_max: value.refresh.inter_refresh_delay_max.clone(),
+                manual_inter_refresh_delay_min: value
+                    .refresh
+                    .manual_inter_refresh_delay_min
+                    .clone(),
+                manual_inter_refresh_delay_max: value
+                    .refresh
+                    .manual_inter_refresh_delay_max
+                    .clone(),
                 failure_backoff: value.refresh.failure_backoff.clone(),
             },
             network: value.network.clone(),
@@ -392,6 +408,13 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
     if min_delay > max_delay {
         bail!("refresh.inter_refresh_delay_min must be <= refresh.inter_refresh_delay_max");
     }
+    let manual_min_delay = parse_duration_str(&config.refresh.manual_inter_refresh_delay_min)?;
+    let manual_max_delay = parse_duration_str(&config.refresh.manual_inter_refresh_delay_max)?;
+    if manual_min_delay > manual_max_delay {
+        bail!(
+            "refresh.manual_inter_refresh_delay_min must be <= refresh.manual_inter_refresh_delay_max"
+        );
+    }
     parse_duration_str(&config.refresh.failure_backoff)?;
     parse_duration_str(&config.network.timeout)?;
     parse_byte_size_str(&config.logging.max_file_size)?;
@@ -538,6 +561,16 @@ fn diff_editable_settings(current: &EditableSettings, incoming: &EditableSetting
     if current.refresh.inter_refresh_delay_max != incoming.refresh.inter_refresh_delay_max {
         changed.push("refresh.inter_refresh_delay_max".to_string());
     }
+    if current.refresh.manual_inter_refresh_delay_min
+        != incoming.refresh.manual_inter_refresh_delay_min
+    {
+        changed.push("refresh.manual_inter_refresh_delay_min".to_string());
+    }
+    if current.refresh.manual_inter_refresh_delay_max
+        != incoming.refresh.manual_inter_refresh_delay_max
+    {
+        changed.push("refresh.manual_inter_refresh_delay_max".to_string());
+    }
     if current.refresh.failure_backoff != incoming.refresh.failure_backoff {
         changed.push("refresh.failure_backoff".to_string());
     }
@@ -557,6 +590,8 @@ fn apply_editable_settings(config: &mut AppConfig, settings: EditableSettings) {
     config.refresh.lead_time = settings.refresh.lead_time;
     config.refresh.inter_refresh_delay_min = settings.refresh.inter_refresh_delay_min;
     config.refresh.inter_refresh_delay_max = settings.refresh.inter_refresh_delay_max;
+    config.refresh.manual_inter_refresh_delay_min = settings.refresh.manual_inter_refresh_delay_min;
+    config.refresh.manual_inter_refresh_delay_max = settings.refresh.manual_inter_refresh_delay_max;
     config.refresh.failure_backoff = settings.refresh.failure_backoff;
     config.network = settings.network;
 }
@@ -631,6 +666,14 @@ fn default_inter_refresh_delay_min() -> String {
 
 fn default_inter_refresh_delay_max() -> String {
     "90s".to_string()
+}
+
+fn default_manual_inter_refresh_delay_min() -> String {
+    default_inter_refresh_delay_min()
+}
+
+fn default_manual_inter_refresh_delay_max() -> String {
+    default_inter_refresh_delay_max()
 }
 
 fn default_failure_backoff() -> String {
@@ -709,6 +752,14 @@ mod tests {
     fn validate_config_rejects_invalid_refresh_interval() {
         let mut config = AppConfig::default();
         config.refresh.interval = "later".to_string();
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_config_rejects_invalid_manual_refresh_delay_range() {
+        let mut config = AppConfig::default();
+        config.refresh.manual_inter_refresh_delay_min = "2m".to_string();
+        config.refresh.manual_inter_refresh_delay_max = "30s".to_string();
         assert!(validate_config(&config).is_err());
     }
 }

@@ -58,6 +58,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/scheduler/start", post(start_scheduler))
         .route("/api/scheduler/stop", post(stop_scheduler))
+        .route(
+            "/api/scheduler/manual-refresh-all",
+            post(trigger_manual_refresh_all),
+        )
         .route("/api/scheduler/status", get(scheduler_status))
         .route("/api/logs", get(get_logs))
         .route("/api/logs/download", get(download_logs))
@@ -647,6 +651,21 @@ async fn stop_scheduler(State(state): State<Arc<AppState>>) -> Response {
         message: "自动刷新已停止".to_string(),
     })
     .into_response()
+}
+
+async fn trigger_manual_refresh_all(State(state): State<Arc<AppState>>) -> Response {
+    match state.scheduler.trigger_manual_refresh_all().await {
+        Ok(()) => {
+            let _ = state
+                .logger
+                .runtime("info", "manual full refresh requested from web console");
+            Json(SimpleMessage {
+                message: "手动全量刷新已开始".to_string(),
+            })
+            .into_response()
+        }
+        Err(err) => json_error(StatusCode::CONFLICT, &err.to_string()),
+    }
 }
 
 async fn scheduler_status(State(state): State<Arc<AppState>>) -> Response {

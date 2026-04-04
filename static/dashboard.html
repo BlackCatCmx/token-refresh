@@ -36,6 +36,7 @@
           <div class="toolbar toolbar-top">
             <button type="button" onclick="schedulerAction('start')">开始自动刷新</button>
             <button type="button" class="secondary" onclick="schedulerAction('stop')">停止自动刷新</button>
+            <button type="button" class="warn" id="manual-refresh-all-btn" onclick="triggerManualRefreshAll()">手动全量刷新</button>
           </div>
         </section>
         <section>
@@ -144,13 +145,23 @@
           <div><label>异常阈值</label><input type="number" id="abnormal-threshold" min="1"></div>
         </div>
 
-        <h3 class="settings-group-title">刷新调度</h3>
+        <h3 class="settings-group-title">自动刷新调度</h3>
         <div class="grid">
           <div><label>刷新周期</label><input type="text" id="refresh-interval"></div>
           <div><label>提前刷新窗口</label><input type="text" id="lead-time"></div>
-          <div><label>账号间最小延迟</label><input type="text" id="delay-min"></div>
-          <div><label>账号间最大延迟</label><input type="text" id="delay-max"></div>
+          <div><label>账号间最小延迟</label><input type="text" id="auto-delay-min"></div>
+          <div><label>账号间最大延迟</label><input type="text" id="auto-delay-max"></div>
           <div><label>失败退避</label><input type="text" id="failure-backoff"></div>
+        </div>
+
+        <h3 class="settings-group-title">手动刷新调度</h3>
+        <div class="grid">
+          <div><label>账号间最小延迟</label><input type="text" id="manual-delay-min"></div>
+          <div><label>账号间最大延迟</label><input type="text" id="manual-delay-max"></div>
+        </div>
+
+        <h3 class="settings-group-title">网络</h3>
+        <div class="grid">
           <div><label>网络超时</label><input type="text" id="network-timeout"></div>
         </div>
 

@@ -1,3 +1,6 @@
+let schedulerPollTimer = null;
+let schedulerManualActive = false;
+
 async function api(url, options = {}) {
   const response = await fetch(url, options);
   if (response.status === 401) {
@@ -29,6 +32,10 @@ async function refreshAll() {
 async function loadScheduler() {
   const data = await api("api/scheduler/status");
   const container = document.getElementById("scheduler-status");
+  const manualState = data.manual_running ? "执行中" : data.manual_pending ? "排队中" : "空闲";
+  const manualStateClass = data.manual_running || data.manual_pending ? "status-on" : "status-off";
+  const manualProgress = `${data.manual_processed_count ?? 0}/${data.manual_total_count ?? 0}`;
+  const manualSummary = `成功 ${data.manual_success_count ?? 0} / 失败 ${data.manual_failed_count ?? 0}`;
   container.innerHTML = `
     <span class="status-label">自动刷新</span>
     <span class="${data.enabled ? "status-on" : "status-off"}">${data.enabled ? "运行中" : "已停止"}</span>
@@ -40,7 +47,40 @@ async function loadScheduler() {
     <span>${escapeHtml(data.next_wake_at ? shortTime(data.next_wake_at) : "待定")}</span>
     <span class="status-label">最近错误</span>
     <span${data.last_error ? ' class="danger-text"' : ""}>${escapeHtml(data.last_error || "无")}</span>
+    <span class="status-label">手动全量刷新</span>
+    <span class="${manualStateClass}">${manualState}</span>
+    <span class="status-label">手动当前账号</span>
+    <span>${escapeHtml(data.manual_current_key || "无")}</span>
+    <span class="status-label">手动进度</span>
+    <span>${escapeHtml(`${manualProgress}（${manualSummary}）`)}</span>
+    <span class="status-label">最近开始时间</span>
+    <span>${escapeHtml(data.manual_last_started_at ? shortTime(data.manual_last_started_at) : "未运行")}</span>
+    <span class="status-label">最近结束时间</span>
+    <span>${escapeHtml(data.manual_last_finished_at ? shortTime(data.manual_last_finished_at) : "未完成")}</span>
+    <span class="status-label">手动最近错误</span>
+    <span${data.manual_last_error ? ' class="danger-text"' : ""}>${escapeHtml(data.manual_last_error || "无")}</span>
   `;
+  const manualBtn = document.getElementById("manual-refresh-all-btn");
+  const manualBusy = Boolean(data.manual_pending || data.manual_running);
+  manualBtn.disabled = manualBusy;
+  manualBtn.textContent = manualBusy ? "手动全量刷新执行中" : "手动全量刷新";
+  if (schedulerPollTimer) {
+    clearTimeout(schedulerPollTimer);
+    schedulerPollTimer = null;
+  }
+  if (data.current_key || manualBusy) {
+    schedulerPollTimer = setTimeout(() => {
+      loadScheduler().catch((error) => console.error(error));
+    }, 2000);
+  }
+  if (schedulerManualActive && !manualBusy) {
+    schedulerManualActive = false;
+    setTimeout(() => {
+      refreshAll().catch((error) => alert(error.message));
+    }, 0);
+    return;
+  }
+  schedulerManualActive = manualBusy;
 }
 
 function shortTime(rfc3339) {
@@ -69,14 +109,16 @@ async function loadSettings() {
   document.getElementById("abnormal-threshold").value = data.settings.credential_management.abnormal_threshold;
   document.getElementById("refresh-interval").value = data.settings.refresh.interval;
   document.getElementById("lead-time").value = data.settings.refresh.lead_time;
-  document.getElementById("delay-min").value = data.settings.refresh.inter_refresh_delay_min;
-  document.getElementById("delay-max").value = data.settings.refresh.inter_refresh_delay_max;
+  document.getElementById("auto-delay-min").value = data.settings.refresh.inter_refresh_delay_min;
+  document.getElementById("auto-delay-max").value = data.settings.refresh.inter_refresh_delay_max;
+  document.getElementById("manual-delay-min").value = data.settings.refresh.manual_inter_refresh_delay_min;
+  document.getElementById("manual-delay-max").value = data.settings.refresh.manual_inter_refresh_delay_max;
   document.getElementById("failure-backoff").value = data.settings.refresh.failure_backoff;
   document.getElementById("network-timeout").value = data.settings.network.timeout;
   syncUserAgentMode();
   renderHeaderPreview(data.header_preview);
   document.getElementById("settings-meta").textContent = `配置文件: ${data.config_path} | 环境变量锁定项: ${data.locked_fields.join(", ") || "无"}`;
-  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "refresh-interval", "lead-time", "delay-min", "delay-max", "failure-backoff", "network-timeout"]) {
+  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout"]) {
     document.getElementById(field).disabled = false;
   }
   const lockMap = {
@@ -94,8 +136,10 @@ async function loadSettings() {
     "credential_management.abnormal_threshold": ["abnormal-threshold"],
     "refresh.interval": ["refresh-interval"],
     "refresh.lead_time": ["lead-time"],
-    "refresh.inter_refresh_delay_min": ["delay-min"],
-    "refresh.inter_refresh_delay_max": ["delay-max"],
+    "refresh.inter_refresh_delay_min": ["auto-delay-min"],
+    "refresh.inter_refresh_delay_max": ["auto-delay-max"],
+    "refresh.manual_inter_refresh_delay_min": ["manual-delay-min"],
+    "refresh.manual_inter_refresh_delay_max": ["manual-delay-max"],
     "refresh.failure_backoff": ["failure-backoff"],
     "network.timeout": ["network-timeout"],
   };
@@ -126,6 +170,14 @@ async function refreshHeaderPreview() {
   renderHeaderPreview(data.header_preview);
 }
 
+async function triggerManualRefreshAll() {
+  if (!confirm("这会按手动调度配置，把正常区凭证依次全量刷新一遍。确认继续吗？")) return;
+  const data = await api("api/scheduler/manual-refresh-all", { method: "POST" });
+  schedulerManualActive = true;
+  await loadScheduler();
+  alert(data.message || "手动全量刷新已开始");
+}
+
 async function saveSettings() {
   const payload = {
     log_level: document.getElementById("log-level").value,
@@ -150,8 +202,10 @@ async function saveSettings() {
     refresh: {
       interval: document.getElementById("refresh-interval").value,
       lead_time: document.getElementById("lead-time").value,
-      inter_refresh_delay_min: document.getElementById("delay-min").value,
-      inter_refresh_delay_max: document.getElementById("delay-max").value,
+      inter_refresh_delay_min: document.getElementById("auto-delay-min").value,
+      inter_refresh_delay_max: document.getElementById("auto-delay-max").value,
+      manual_inter_refresh_delay_min: document.getElementById("manual-delay-min").value,
+      manual_inter_refresh_delay_max: document.getElementById("manual-delay-max").value,
       failure_backoff: document.getElementById("failure-backoff").value,
     },
     network: {
@@ -480,6 +534,7 @@ function switchTab(tabId) {
 window.refreshAll = refreshAll;
 window.refreshHeaderPreview = refreshHeaderPreview;
 window.schedulerAction = schedulerAction;
+window.triggerManualRefreshAll = triggerManualRefreshAll;
 window.saveSettings = saveSettings;
 window.syncUserAgentMode = syncUserAgentMode;
 window.manualRefresh = manualRefresh;

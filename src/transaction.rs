@@ -15,6 +15,7 @@ use crate::status::CredentialStatusStore;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefreshTrigger {
     Manual,
+    ManualBatch,
     Scheduler,
 }
 
@@ -22,6 +23,7 @@ impl RefreshTrigger {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Manual => "manual",
+            Self::ManualBatch => "manual_batch",
             Self::Scheduler => "scheduler",
         }
     }

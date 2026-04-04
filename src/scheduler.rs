@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use tokio::sync::{Notify, RwLock};
@@ -22,11 +22,23 @@ pub struct SchedulerStatus {
     pub last_cycle_at: Option<String>,
     pub next_wake_at: Option<String>,
     pub last_error: Option<String>,
+    pub manual_pending: bool,
+    pub manual_running: bool,
+    pub manual_current_key: Option<String>,
+    pub manual_total_count: usize,
+    pub manual_processed_count: usize,
+    pub manual_success_count: usize,
+    pub manual_failed_count: usize,
+    pub manual_last_started_at: Option<String>,
+    pub manual_last_finished_at: Option<String>,
+    pub manual_last_error: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct SchedulerHandle {
     enabled: Arc<AtomicBool>,
+    manual_busy: Arc<AtomicBool>,
+    manual_requested: Arc<AtomicBool>,
     notify: Arc<Notify>,
     status: Arc<RwLock<SchedulerStatus>>,
     backoff_until: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
@@ -39,6 +51,8 @@ struct SchedulerRuntime {
     transaction: Arc<RefreshTransaction>,
     logger: Arc<LogManager>,
     enabled: Arc<AtomicBool>,
+    manual_busy: Arc<AtomicBool>,
+    manual_requested: Arc<AtomicBool>,
     notify: Arc<Notify>,
     status: Arc<RwLock<SchedulerStatus>>,
     backoff_until: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
@@ -48,6 +62,8 @@ impl SchedulerHandle {
     pub fn new() -> Self {
         Self {
             enabled: Arc::new(AtomicBool::new(true)),
+            manual_busy: Arc::new(AtomicBool::new(false)),
+            manual_requested: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
             status: Arc::new(RwLock::new(SchedulerStatus {
                 enabled: true,
@@ -72,6 +88,8 @@ impl SchedulerHandle {
             transaction,
             logger,
             enabled: self.enabled.clone(),
+            manual_busy: self.manual_busy.clone(),
+            manual_requested: self.manual_requested.clone(),
             notify: self.notify.clone(),
             status: self.status.clone(),
             backoff_until: self.backoff_until.clone(),
@@ -105,6 +123,24 @@ impl SchedulerHandle {
         self.status.read().await.clone()
     }
 
+    pub async fn trigger_manual_refresh_all(&self) -> Result<()> {
+        if self
+            .manual_busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            bail!("手动全量刷新正在执行中");
+        }
+        self.manual_requested.store(true, Ordering::SeqCst);
+        {
+            let mut status = self.status.write().await;
+            status.manual_pending = true;
+            status.manual_last_error = None;
+        }
+        self.notify.notify_waiters();
+        Ok(())
+    }
+
     pub fn wake(&self) {
         self.notify.notify_waiters();
     }
@@ -113,6 +149,22 @@ impl SchedulerHandle {
 impl SchedulerRuntime {
     async fn run(self) {
         loop {
+            if self.manual_requested.swap(false, Ordering::SeqCst) {
+                let manual_result = self.run_manual_refresh_all().await;
+                self.manual_busy.store(false, Ordering::SeqCst);
+                if let Err(err) = manual_result {
+                    let _ = self
+                        .logger
+                        .runtime("error", format!("manual full refresh failed: {err:#}"));
+                    let mut status = self.status.write().await;
+                    status.manual_pending = false;
+                    status.manual_running = false;
+                    status.manual_current_key = None;
+                    status.manual_last_error = Some(err.to_string());
+                    status.manual_last_finished_at = Some(Utc::now().to_rfc3339());
+                }
+                continue;
+            }
             if !self.enabled.load(Ordering::SeqCst) {
                 {
                     let mut status = self.status.write().await;
@@ -214,7 +266,8 @@ impl SchedulerRuntime {
                 let mut status = self.status.write().await;
                 status.current_key = None;
             }
-            if !self.enabled.load(Ordering::SeqCst) {
+            if !self.enabled.load(Ordering::SeqCst) || self.manual_requested.load(Ordering::SeqCst)
+            {
                 break;
             }
             let delay = random_delay(
@@ -226,6 +279,103 @@ impl SchedulerRuntime {
                 _ = self.notify.notified() => {}
             }
         }
+        Ok(())
+    }
+
+    async fn run_manual_refresh_all(&self) -> Result<()> {
+        let config = self.config_manager.effective_config().await;
+        let mut keys = self
+            .store
+            .scan_zone(CredentialZone::Normal)?
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect::<Vec<_>>();
+        keys.sort();
+        {
+            let mut status = self.status.write().await;
+            status.manual_pending = false;
+            status.manual_running = true;
+            status.manual_current_key = None;
+            status.manual_total_count = keys.len();
+            status.manual_processed_count = 0;
+            status.manual_success_count = 0;
+            status.manual_failed_count = 0;
+            status.manual_last_started_at = Some(Utc::now().to_rfc3339());
+            status.manual_last_finished_at = None;
+            status.manual_last_error = None;
+        }
+        let _ = self.logger.runtime(
+            "info",
+            format!(
+                "manual full refresh started for {} credential(s)",
+                keys.len()
+            ),
+        );
+        let min_delay = parse_duration_str(&config.refresh.manual_inter_refresh_delay_min)?;
+        let max_delay = parse_duration_str(&config.refresh.manual_inter_refresh_delay_max)?;
+        for (index, key) in keys.iter().enumerate() {
+            {
+                let mut status = self.status.write().await;
+                status.manual_current_key = Some(key.clone());
+            }
+            let result = self
+                .transaction
+                .refresh_one(
+                    &config,
+                    CredentialZone::Normal,
+                    key,
+                    crate::transaction::RefreshTrigger::ManualBatch,
+                )
+                .await;
+            match result {
+                Ok(outcome) => {
+                    let mut status = self.status.write().await;
+                    status.manual_processed_count += 1;
+                    if outcome.success {
+                        status.manual_success_count += 1;
+                    } else {
+                        status.manual_failed_count += 1;
+                    }
+                    status.manual_current_key = None;
+                }
+                Err(err) => {
+                    let _ = self.logger.runtime(
+                        "error",
+                        format!("manual full refresh hit internal error on {}: {err:#}", key),
+                    );
+                    let mut status = self.status.write().await;
+                    status.manual_processed_count += 1;
+                    status.manual_failed_count += 1;
+                    status.manual_current_key = None;
+                    status.manual_last_error = Some(err.to_string());
+                }
+            }
+            if index + 1 >= keys.len() {
+                continue;
+            }
+            let delay = random_delay(min_delay, max_delay);
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = self.notify.notified() => {}
+            }
+        }
+        {
+            let mut status = self.status.write().await;
+            status.manual_running = false;
+            status.manual_current_key = None;
+            status.manual_last_finished_at = Some(Utc::now().to_rfc3339());
+        }
+        let status = self.status.read().await.clone();
+        let _ = self.logger.runtime(
+            "info",
+            format!(
+                "manual full refresh finished (total={}, processed={}, success={}, failed={})",
+                status.manual_total_count,
+                status.manual_processed_count,
+                status.manual_success_count,
+                status.manual_failed_count
+            ),
+        );
         Ok(())
     }
 
@@ -327,5 +477,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(until, Utc.with_ymd_and_hms(2026, 1, 1, 0, 15, 0).unwrap());
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_request_rejects_duplicate_triggers() {
+        let handle = SchedulerHandle::new();
+        handle.trigger_manual_refresh_all().await.unwrap();
+        assert!(handle.trigger_manual_refresh_all().await.is_err());
     }
 }
