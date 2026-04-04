@@ -145,14 +145,6 @@ section {
 
 .select-all-label input[type="checkbox"] { width: 16px; height: 16px; }
 
-.import-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.import-row input[type="file"] { flex: 1; min-width: 0; }
 
 /* ── Buttons ── */
 button {
@@ -424,6 +416,42 @@ pre {
 
 .login-wrap p { line-height: 1.6; color: #64748b; margin-bottom: 20px; }
 .login-wrap button { width: 100%; margin-top: 12px; padding: 11px; }
+
+/* ── Page centering ── */
+.page-wrap {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+/* ── Expandable field (details/summary) ── */
+.field-expand > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+  user-select: none;
+}
+
+.field-expand > summary::-webkit-details-marker { display: none; }
+
+.field-expand > summary::before {
+  content: '▶';
+  font-size: 9px;
+  color: #94a3b8;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+
+.field-expand[open] > summary::before { transform: rotate(90deg); }
+
+.field-expand > summary:hover { color: #1e293b; }
+
+.field-expand > textarea { margin-top: 6px; min-height: 180px; }
 
 /* ── Responsive ── */
 @media (max-width: 800px) {

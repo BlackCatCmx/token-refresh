@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
+  <div class="page-wrap">
   <header>
     <div>
       <h1>Codex Refresh 控制台</h1>
@@ -72,15 +73,11 @@
     <div id="tab-credentials" class="tab-panel hidden">
       <section class="full-width">
         <h2>导入与导出</h2>
-        <div class="import-row">
-          <input id="upload-files" type="file" multiple accept=".json,.zip">
-          <button type="button" onclick="importFiles()">上传</button>
-        </div>
-        <div class="toolbar toolbar-top">
+        <input id="upload-files" type="file" multiple accept=".json,.zip" style="display:none" onchange="importFiles()">
+        <div class="toolbar">
+          <button type="button" onclick="document.getElementById('upload-files').click()">上传凭证</button>
           <button type="button" class="secondary" onclick="downloadCredentialArchive('normal')">下载正常区 ZIP</button>
           <button type="button" class="secondary" onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
-        </div>
-        <div class="toolbar">
           <button type="button" class="secondary" onclick="fillMissingUserAgents()">补充缺失 UA</button>
           <button type="button" class="warn" onclick="reassignAllUserAgents()">强制重配全部 UA</button>
         </div>
@@ -122,7 +119,7 @@
         <div class="grid">
           <div><label>originator</label><input type="text" id="originator"></div>
           <div><label>UA 模式</label><select id="user-agent-mode" onchange="syncUserAgentMode()"><option value="list">list：手写列表</option><option value="generated">generated：按规则生成</option></select></div>
-          <div id="user-agent-list-group" class="grid-full"><label>User-Agent 列表</label><textarea id="user-agent" rows="3" placeholder="一行一个 User-Agent；上传缺失时随机分配"></textarea></div>
+          <details id="user-agent-list-group" class="grid-full field-expand"><summary>User-Agent 列表</summary><textarea id="user-agent" rows="6" placeholder="一行一个 User-Agent；上传缺失时随机分配"></textarea></details>
           <div id="user-agent-versions-group" class="grid-full" hidden><label>CLI 版本规则</label><textarea id="user-agent-versions" rows="3" placeholder="一行一个版本，或一行一个范围，例如 0.114.0 - 0.118.0；跨 minor 范围时两端 patch 必须为 .0"></textarea></div>
           <div id="user-agent-profiles-group" class="grid-full" hidden><label>系统档案</label><textarea id="user-agent-profiles" rows="3" placeholder="一行一个：windows10 / windows11 / macos / ubuntu / debian"></textarea></div>
           <div id="user-agent-terminals-group" class="grid-full" hidden><label>终端列表</label><textarea id="user-agent-terminals" rows="3" placeholder="一行一个：WindowsTerminal / Apple_Terminal / iTerm.app / vscode / WezTerm / Ghostty / WarpTerminal / kitty"></textarea></div>
@@ -139,8 +136,7 @@
         <div class="grid">
           <div><label>代理模式</label><select id="proxy-mode"><option value="fixed">fixed</option><option value="round_robin">round_robin</option></select></div>
         </div>
-        <label class="block-label">SOCKS5 代理列表</label>
-        <textarea id="proxy-list" placeholder="一行一个 socks5://ip:port"></textarea>
+        <details class="field-expand"><summary>SOCKS5 代理列表</summary><textarea id="proxy-list" placeholder="一行一个 socks5://ip:port"></textarea></details>
 
         <h3 class="settings-group-title">凭证管理</h3>
         <div class="grid">
@@ -164,6 +160,7 @@
     </div>
 
   </main>
+  </div><!-- /.page-wrap -->
   <script src="assets/dashboard.js" defer></script>
 </body>
 </html>
