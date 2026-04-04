@@ -251,30 +251,41 @@ async function manualRefresh(name, btn) {
   btn.textContent = "刷新中…";
 
   // 分离主请求与页面重载，避免 refreshAll 失败污染刷新结果判断
-  let success = false;
+  let refreshError = null;
   try {
     await api("api/credentials/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: decodeURIComponent(name) }),
     });
-    success = true;
   } catch (error) {
+    refreshError = error;
     showToast(error.message, "error");
   }
 
   // 无论成功失败都重拉，同步后端最新状态（失败计数、异常区迁移等）
+  let reloadError = null;
   try {
     await refreshAll();
-  } catch {
-    // 页面重载失败时，若主请求也失败，按钮卡片未重渲染，需手动恢复以允许重试
-    if (!success) {
-      btn.disabled = false;
-      btn.textContent = originalText;
-    }
+  } catch (error) {
+    reloadError = error;
   }
 
-  if (success) showToast("刷新成功");
+  // 若卡片未被重绘，恢复按钮状态，避免一直卡在“刷新中…”
+  if (reloadError && btn.isConnected) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+
+  if (reloadError) {
+    const message = refreshError
+      ? `页面同步失败：${reloadError.message}`
+      : `刷新已完成，但页面同步失败：${reloadError.message}`;
+    showToast(message, "error", 4500);
+    return;
+  }
+
+  if (!refreshError) showToast("刷新成功");
 }
 
 async function restoreCredential(name) {
