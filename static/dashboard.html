@@ -24,45 +24,51 @@
   </nav>
   <main>
 
-    <div id="tab-status" class="tab-panel">
-      <section>
-        <h2>调度状态</h2>
-        <div id="scheduler-status" class="status-grid">
-          <span class="status-label">加载中...</span>
-        </div>
-        <div class="toolbar toolbar-top">
-          <button type="button" onclick="schedulerAction('start')">开始自动刷新</button>
-          <button type="button" class="warn" onclick="schedulerAction('stop')">停止自动刷新</button>
-        </div>
-      </section>
-      <section>
-        <h2>请求头预览</h2>
-        <div class="toolbar">
-          <button type="button" class="secondary" onclick="refreshHeaderPreview()">随机生成预览</button>
-        </div>
-        <pre id="header-preview"></pre>
-      </section>
-      <section>
-        <h2>运行日志</h2>
-        <div class="toolbar">
-          <button type="button" onclick="reloadLog('runtime')">刷新</button>
-          <button type="button" onclick="downloadLog('runtime')">下载</button>
-          <button type="button" class="warn" onclick="clearLog('runtime')">清空</button>
-        </div>
-        <pre id="runtime-log"></pre>
-      </section>
-      <section>
-        <h2>审计日志</h2>
-        <div class="toolbar">
-          <button type="button" onclick="reloadLog('audit')">刷新</button>
-          <button type="button" onclick="downloadLog('audit')">下载</button>
-          <button type="button" class="warn" onclick="clearLog('audit')">清空</button>
-          <button type="button" class="secondary" onclick="downloadLog('all')">打包下载全部日志</button>
-        </div>
-        <pre id="audit-log"></pre>
-      </section>
+    <!-- 状态 Tab：左窄（调度+预览）右宽（两日志） -->
+    <div id="tab-status" class="tab-panel tab-panel--status">
+      <div class="status-col">
+        <section>
+          <h2>调度状态</h2>
+          <div id="scheduler-status" class="status-grid">
+            <span class="status-label">加载中...</span>
+          </div>
+          <div class="toolbar toolbar-top">
+            <button type="button" onclick="schedulerAction('start')">开始自动刷新</button>
+            <button type="button" class="secondary" onclick="schedulerAction('stop')">停止自动刷新</button>
+          </div>
+        </section>
+        <section>
+          <h2>请求头预览</h2>
+          <div class="toolbar">
+            <button type="button" class="secondary" onclick="refreshHeaderPreview()">随机生成预览</button>
+          </div>
+          <pre id="header-preview"></pre>
+        </section>
+      </div>
+      <div class="status-col">
+        <section>
+          <h2>运行日志</h2>
+          <div class="toolbar">
+            <button type="button" onclick="reloadLog('runtime')">刷新</button>
+            <button type="button" class="secondary" onclick="downloadLog('runtime')">下载</button>
+            <button type="button" class="warn" onclick="clearLog('runtime')">清空</button>
+          </div>
+          <pre id="runtime-log"></pre>
+        </section>
+        <section>
+          <h2>审计日志</h2>
+          <div class="toolbar">
+            <button type="button" onclick="reloadLog('audit')">刷新</button>
+            <button type="button" class="secondary" onclick="downloadLog('audit')">下载</button>
+            <button type="button" class="warn" onclick="clearLog('audit')">清空</button>
+            <button type="button" class="secondary" onclick="downloadLog('all')">打包下载全部日志</button>
+          </div>
+          <pre id="audit-log"></pre>
+        </section>
+      </div>
     </div>
 
+    <!-- 凭证 Tab -->
     <div id="tab-credentials" class="tab-panel hidden">
       <section class="full-width">
         <h2>导入与导出</h2>
@@ -71,8 +77,8 @@
           <button type="button" onclick="importFiles()">上传</button>
         </div>
         <div class="toolbar toolbar-top">
-          <button type="button" onclick="downloadCredentialArchive('normal')">下载正常区 ZIP</button>
-          <button type="button" onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
+          <button type="button" class="secondary" onclick="downloadCredentialArchive('normal')">下载正常区 ZIP</button>
+          <button type="button" class="secondary" onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
         </div>
         <div class="toolbar">
           <button type="button" class="secondary" onclick="fillMissingUserAgents()">补充缺失 UA</button>
@@ -107,29 +113,49 @@
       </section>
     </div>
 
+    <!-- 设置 Tab -->
     <div id="tab-settings" class="tab-panel hidden">
       <section>
         <h2>设置</h2>
+
+        <h3 class="settings-group-title">请求标识</h3>
         <div class="grid">
           <div><label>originator</label><input type="text" id="originator"></div>
           <div><label>UA 模式</label><select id="user-agent-mode" onchange="syncUserAgentMode()"><option value="list">list：手写列表</option><option value="generated">generated：按规则生成</option></select></div>
-          <div id="user-agent-list-group"><label>User-Agent 列表</label><textarea id="user-agent" rows="3" placeholder="一行一个 User-Agent；上传缺失时随机分配"></textarea></div>
-          <div id="user-agent-versions-group" hidden><label>CLI 版本规则</label><textarea id="user-agent-versions" rows="3" placeholder="一行一个版本，或一行一个范围，例如 0.114.0 - 0.118.0；跨 minor 范围时两端 patch 必须为 .0"></textarea></div>
-          <div id="user-agent-profiles-group" hidden><label>系统档案</label><textarea id="user-agent-profiles" rows="3" placeholder="一行一个：windows10 / windows11 / macos / ubuntu / debian"></textarea></div>
-          <div id="user-agent-terminals-group" hidden><label>终端列表</label><textarea id="user-agent-terminals" rows="3" placeholder="一行一个：WindowsTerminal / Apple_Terminal / iTerm.app / vscode / WezTerm / Ghostty / WarpTerminal / kitty"></textarea></div>
+          <div id="user-agent-list-group" class="grid-full"><label>User-Agent 列表</label><textarea id="user-agent" rows="3" placeholder="一行一个 User-Agent；上传缺失时随机分配"></textarea></div>
+          <div id="user-agent-versions-group" class="grid-full" hidden><label>CLI 版本规则</label><textarea id="user-agent-versions" rows="3" placeholder="一行一个版本，或一行一个范围，例如 0.114.0 - 0.118.0；跨 minor 范围时两端 patch 必须为 .0"></textarea></div>
+          <div id="user-agent-profiles-group" class="grid-full" hidden><label>系统档案</label><textarea id="user-agent-profiles" rows="3" placeholder="一行一个：windows10 / windows11 / macos / ubuntu / debian"></textarea></div>
+          <div id="user-agent-terminals-group" class="grid-full" hidden><label>终端列表</label><textarea id="user-agent-terminals" rows="3" placeholder="一行一个：WindowsTerminal / Apple_Terminal / iTerm.app / vscode / WezTerm / Ghostty / WarpTerminal / kitty"></textarea></div>
+        </div>
+        <div id="user-agent-mode-hint" class="muted"></div>
+
+        <h3 class="settings-group-title">日志</h3>
+        <div class="grid">
           <div><label>日志级别</label><select id="log-level"><option value="info">info（最详细）</option><option value="warn">warn</option><option value="error">error</option></select></div>
           <div><label>日志单文件上限</label><input type="text" id="max-file-size"></div>
+        </div>
+
+        <h3 class="settings-group-title">代理</h3>
+        <div class="grid">
           <div><label>代理模式</label><select id="proxy-mode"><option value="fixed">fixed</option><option value="round_robin">round_robin</option></select></div>
+        </div>
+        <label class="block-label">SOCKS5 代理列表</label>
+        <textarea id="proxy-list" placeholder="一行一个 socks5://ip:port"></textarea>
+
+        <h3 class="settings-group-title">凭证管理</h3>
+        <div class="grid">
           <div><label>异常阈值</label><input type="number" id="abnormal-threshold" min="1"></div>
+        </div>
+
+        <h3 class="settings-group-title">刷新调度</h3>
+        <div class="grid">
           <div><label>提前刷新窗口</label><input type="text" id="lead-time"></div>
           <div><label>刷新间最小延迟</label><input type="text" id="delay-min"></div>
           <div><label>刷新间最大延迟</label><input type="text" id="delay-max"></div>
           <div><label>失败退避</label><input type="text" id="failure-backoff"></div>
           <div><label>网络超时</label><input type="text" id="network-timeout"></div>
         </div>
-        <div id="user-agent-mode-hint" class="muted"></div>
-        <label class="block-label">SOCKS5 代理列表</label>
-        <textarea id="proxy-list" placeholder="一行一个 socks5://ip:port"></textarea>
+
         <div class="toolbar toolbar-top">
           <button type="button" onclick="saveSettings()">保存设置</button>
         </div>

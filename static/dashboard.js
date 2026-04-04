@@ -29,15 +29,16 @@ async function refreshAll() {
 async function loadScheduler() {
   const data = await api("api/scheduler/status");
   const container = document.getElementById("scheduler-status");
-  const rows = [
-    ["自动刷新", data.enabled ? "开启" : "停止"],
-    ["当前账号", data.current_key || "无"],
-    ["下次唤醒", data.next_wake_at ? shortTime(data.next_wake_at) : "待定"],
-    ["最近错误", data.last_error || "无"],
-  ];
-  container.innerHTML = rows.map(([label, value]) =>
-    `<span class="status-label">${escapeHtml(label)}</span><span>${escapeHtml(value)}</span>`
-  ).join("");
+  container.innerHTML = `
+    <span class="status-label">自动刷新</span>
+    <span class="${data.enabled ? "status-on" : "status-off"}">${data.enabled ? "运行中" : "已停止"}</span>
+    <span class="status-label">当前账号</span>
+    <span>${escapeHtml(data.current_key || "无")}</span>
+    <span class="status-label">下次唤醒</span>
+    <span>${escapeHtml(data.next_wake_at ? shortTime(data.next_wake_at) : "待定")}</span>
+    <span class="status-label">最近错误</span>
+    <span${data.last_error ? ' class="danger-text"' : ""}>${escapeHtml(data.last_error || "无")}</span>
+  `;
 }
 
 function shortTime(rfc3339) {
@@ -190,7 +191,7 @@ async function loadCredentials(zone) {
          <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
          <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`;
     const card = document.createElement("div");
-    card.className = "cred-card";
+    card.className = `cred-card cred-card--${zone}`;
     card.innerHTML = `
       <div class="cred-card-top">
         <input type="checkbox" class="row-check card-check" data-zone="${zone}" data-name="${encodedName}" onchange="syncSelectAll('${zone}')">
