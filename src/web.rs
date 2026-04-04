@@ -18,6 +18,7 @@ use crate::status::CredentialStatusStore;
 use crate::transaction::RefreshTransaction;
 
 type HmacSha256 = Hmac<Sha256>;
+const SESSION_COOKIE_LIFETIME_DAYS: i64 = 3650;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -60,22 +61,28 @@ impl SessionManager {
     }
 
     pub fn login_cookie(&self) -> Result<String> {
+        let max_age = cookie::time::Duration::days(SESSION_COOKIE_LIFETIME_DAYS);
+        let expires_at = cookie::time::OffsetDateTime::now_utc() + max_age;
         Ok(
             Cookie::build((self.cookie_name, self.expected_value.clone()))
                 .path("/")
                 .http_only(true)
                 .same_site(SameSite::Lax)
+                .max_age(max_age)
+                .expires(expires_at)
                 .build()
                 .to_string(),
         )
     }
 
     pub fn logout_cookie(&self) -> Result<String> {
+        let removed_at = cookie::time::OffsetDateTime::UNIX_EPOCH;
         Ok(Cookie::build((self.cookie_name, ""))
             .path("/")
             .http_only(true)
             .same_site(SameSite::Lax)
             .max_age(cookie::time::Duration::seconds(0))
+            .expires(removed_at)
             .build()
             .to_string())
     }
@@ -193,4 +200,51 @@ fn hex_encode(bytes: &[u8]) -> String {
         result.push(HEX[(byte & 0x0f) as usize] as char);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, header};
+
+    use super::*;
+
+    #[test]
+    fn login_cookie_is_persistent_and_authenticates_requests() {
+        let session = SessionManager::new("secret").unwrap();
+        let set_cookie = session.login_cookie().unwrap();
+        let parsed = Cookie::parse(set_cookie).unwrap();
+
+        assert_eq!(parsed.name(), "codex_refresh_session");
+        assert_eq!(parsed.value(), session.expected_value);
+        assert_eq!(
+            parsed.max_age(),
+            Some(cookie::time::Duration::days(SESSION_COOKIE_LIFETIME_DAYS))
+        );
+        assert!(parsed.expires().is_some());
+        assert_eq!(parsed.http_only(), Some(true));
+        assert_eq!(parsed.same_site(), Some(SameSite::Lax));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", parsed.name(), parsed.value())
+                .parse()
+                .unwrap(),
+        );
+        assert!(session.is_authenticated(&headers));
+    }
+
+    #[test]
+    fn logout_cookie_clears_session() {
+        let session = SessionManager::new("secret").unwrap();
+        let set_cookie = session.logout_cookie().unwrap();
+        let parsed = Cookie::parse(set_cookie).unwrap();
+
+        assert_eq!(parsed.name(), "codex_refresh_session");
+        assert_eq!(parsed.value(), "");
+        assert_eq!(parsed.max_age(), Some(cookie::time::Duration::seconds(0)));
+        assert!(parsed.expires().is_some());
+        assert_eq!(parsed.http_only(), Some(true));
+        assert_eq!(parsed.same_site(), Some(SameSite::Lax));
+    }
 }
