@@ -248,9 +248,8 @@ function showToast(message, type = "success", duration = 3000) {
 }
 
 async function manualRefresh(name, btn) {
-  const originalText = btn.textContent;
   btn.disabled = true;
-  btn.textContent = "刷新中…";
+  btn.classList.add("loading");
 
   // 分离主请求与页面重载，避免 refreshAll 失败污染刷新结果判断
   let refreshError = null;
@@ -273,10 +272,10 @@ async function manualRefresh(name, btn) {
     reloadError = error;
   }
 
-  // 若卡片未被重绘，恢复按钮状态，避免一直卡在“刷新中…”
+  // 若卡片未被重绘，恢复按钮状态
   if (reloadError && btn.isConnected) {
     btn.disabled = false;
-    btn.textContent = originalText;
+    btn.classList.remove("loading");
   }
 
   if (reloadError) {

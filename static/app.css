@@ -164,6 +164,7 @@ section {
 
 /* ── Buttons ── */
 button {
+  position: relative;
   border: 1.5px solid transparent;
   border-radius: 9px;
   padding: 8px 14px;
@@ -214,6 +215,40 @@ button.danger:hover {
   background: #fecaca;
   border-color: #f87171;
   box-shadow: none;
+}
+
+/* Loading spinner — 声明在所有颜色变体之后，确保 color:transparent 优先 */
+button.loading {
+  color: transparent;
+  pointer-events: none;
+}
+
+button.loading::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 1em;
+  height: 1em;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: btn-spin 0.65s linear infinite;
+}
+
+button.secondary.loading::after {
+  border-color: rgba(71,85,105,0.25);
+  border-top-color: #475569;
+}
+
+button.danger.loading::after {
+  border-color: rgba(220,38,38,0.25);
+  border-top-color: #dc2626;
+}
+
+@keyframes btn-spin {
+  to { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
 /* ── Inputs ── */
