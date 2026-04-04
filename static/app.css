@@ -418,6 +418,37 @@ select:disabled, input:disabled, textarea:disabled {
   margin-top: 14px;
 }
 
+/* ── Toast ── */
+#toast-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 10px 16px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: 0 4px 16px rgba(15,23,42,0.15);
+  max-width: 300px;
+  word-break: break-word;
+  animation: toast-in 0.18s ease;
+}
+
+.toast--success { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.toast--error   { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
 /* ── Pre / Log ── */
 pre {
   background: #0f172a;

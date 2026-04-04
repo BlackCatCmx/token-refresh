@@ -187,7 +187,7 @@ async function loadCredentials(zone) {
       ? `<div class="cred-error">${escapeHtml(row.parse_error)}</div>`
       : "";
     const actions = zone === "normal"
-      ? `<button type="button" onclick="manualRefresh('${encodedName}')">刷新</button>
+      ? `<button type="button" onclick="manualRefresh('${encodedName}', this)">刷新</button>
          <button type="button" class="secondary" onclick="openCredentialEditor('${zone}','${encodedName}')">编辑</button>
          <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
          <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`
@@ -236,13 +236,32 @@ function syncSelectAll(zone) {
   selectAll.checked = all.every((element) => element.checked);
 }
 
-async function manualRefresh(name) {
-  await api("api/credentials/refresh", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: decodeURIComponent(name) }),
-  });
-  await refreshAll();
+function showToast(message, type = "success", duration = 3000) {
+  const container = document.getElementById("toast-container");
+  const toast = document.createElement("div");
+  toast.className = `toast toast--${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), duration);
+}
+
+async function manualRefresh(name, btn) {
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "刷新中…";
+  try {
+    await api("api/credentials/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: decodeURIComponent(name) }),
+    });
+    await refreshAll();
+    showToast("刷新成功");
+  } catch (error) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    showToast(error.message, "error");
+  }
 }
 
 async function restoreCredential(name) {
