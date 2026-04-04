@@ -9,8 +9,10 @@ use rand::Rng;
 use tokio::sync::{Notify, RwLock};
 
 use crate::config::{ConfigManager, parse_duration_str};
+use crate::credential::parse_rfc3339;
 use crate::credential_store::{CredentialStore, CredentialZone};
 use crate::logging::LogManager;
+use crate::status::{CredentialStatusRecord, CredentialStatusStore, normalize_status_key};
 use crate::transaction::{RefreshOutcome, RefreshTransaction, due_at};
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -33,6 +35,7 @@ pub struct SchedulerHandle {
 struct SchedulerRuntime {
     config_manager: ConfigManager,
     store: Arc<CredentialStore>,
+    status_store: Arc<CredentialStatusStore>,
     transaction: Arc<RefreshTransaction>,
     logger: Arc<LogManager>,
     enabled: Arc<AtomicBool>,
@@ -58,12 +61,14 @@ impl SchedulerHandle {
         &self,
         config_manager: ConfigManager,
         store: Arc<CredentialStore>,
+        status_store: Arc<CredentialStatusStore>,
         transaction: Arc<RefreshTransaction>,
         logger: Arc<LogManager>,
     ) {
         let runtime = SchedulerRuntime {
             config_manager,
             store,
+            status_store,
             transaction,
             logger,
             enabled: self.enabled.clone(),
@@ -133,21 +138,23 @@ impl SchedulerRuntime {
         let config = self.config_manager.effective_config().await;
         let now = Utc::now();
         let entries = self.store.scan_zone(CredentialZone::Normal)?;
+        let statuses = self.status_store.all()?;
         let mut due_entries = Vec::new();
         let mut next_wake_at: Option<DateTime<Utc>> = None;
         let backoff_map = self.backoff_until.read().await.clone();
         for entry in entries {
             let key = entry.key.clone();
             let due = if let Some(credential) = entry.credential.as_ref() {
-                due_at(&config, credential)?.unwrap_or(now)
+                due_at(&config, credential, now)?.unwrap_or(now)
             } else {
                 now
             };
-            let scheduled_time = if let Some(backoff) = backoff_map.get(&key) {
-                (*backoff).max(due)
-            } else {
-                due
-            };
+            let persisted_backoff =
+                persisted_backoff_until(&config, statuses.get(&normalize_status_key(&key)))?;
+            let scheduled_time = persisted_backoff
+                .into_iter()
+                .chain(backoff_map.get(&key).copied())
+                .fold(due, |current, value| current.max(value));
             if scheduled_time <= now {
                 due_entries.push(key);
             } else {
@@ -281,4 +288,44 @@ fn random_delay(min: Duration, max: Duration) -> Duration {
     let max_ms = max.as_millis() as u64;
     let value = rand::rng().random_range(min_ms..=max_ms);
     Duration::from_millis(value)
+}
+
+fn persisted_backoff_until(
+    config: &crate::config::AppConfig,
+    status: Option<&CredentialStatusRecord>,
+) -> Result<Option<DateTime<Utc>>> {
+    let Some(last_failure_at) = status.and_then(|value| value.last_failure_at.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(last_failure_at) = parse_rfc3339(last_failure_at) else {
+        return Ok(None);
+    };
+    let failure_backoff = parse_duration_str(&config.refresh.failure_backoff)?;
+    Ok(Some(
+        last_failure_at
+            + chrono::Duration::from_std(failure_backoff)
+                .map_err(|err| anyhow::anyhow!("invalid failure_backoff duration: {err}"))?,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn persisted_backoff_uses_last_failure_timestamp() {
+        let config = crate::config::AppConfig::default();
+        let status = CredentialStatusRecord {
+            last_failure_at: Some("2026-01-01T00:00:00Z".to_string()),
+            ..CredentialStatusRecord::default()
+        };
+
+        let until = persisted_backoff_until(&config, Some(&status))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(until, Utc.with_ymd_and_hms(2026, 1, 1, 0, 15, 0).unwrap());
+    }
 }

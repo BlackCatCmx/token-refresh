@@ -37,6 +37,7 @@ credential_management:
   abnormal_threshold: 1
 
 refresh:
+  interval: "6h"
   lead_time: "24h"
   min_sleep: "60s"
   max_sleep: "10m"

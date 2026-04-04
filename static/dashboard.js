@@ -65,6 +65,7 @@ async function loadSettings() {
   document.getElementById("proxy-mode").value = data.settings.proxy.mode;
   document.getElementById("proxy-list").value = data.settings.proxy.list;
   document.getElementById("abnormal-threshold").value = data.settings.credential_management.abnormal_threshold;
+  document.getElementById("refresh-interval").value = data.settings.refresh.interval;
   document.getElementById("lead-time").value = data.settings.refresh.lead_time;
   document.getElementById("delay-min").value = data.settings.refresh.inter_refresh_delay_min;
   document.getElementById("delay-max").value = data.settings.refresh.inter_refresh_delay_max;
@@ -73,7 +74,7 @@ async function loadSettings() {
   syncUserAgentMode();
   renderHeaderPreview(data.header_preview);
   document.getElementById("settings-meta").textContent = `配置文件: ${data.config_path} | 环境变量锁定项: ${data.locked_fields.join(", ") || "无"}`;
-  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "lead-time", "delay-min", "delay-max", "failure-backoff", "network-timeout"]) {
+  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "refresh-interval", "lead-time", "delay-min", "delay-max", "failure-backoff", "network-timeout"]) {
     document.getElementById(field).disabled = false;
   }
   const lockMap = {
@@ -89,6 +90,7 @@ async function loadSettings() {
     "proxy.mode": ["proxy-mode"],
     "proxy.list": ["proxy-list"],
     "credential_management.abnormal_threshold": ["abnormal-threshold"],
+    "refresh.interval": ["refresh-interval"],
     "refresh.lead_time": ["lead-time"],
     "refresh.inter_refresh_delay_min": ["delay-min"],
     "refresh.inter_refresh_delay_max": ["delay-max"],
@@ -144,6 +146,7 @@ async function saveSettings() {
       abnormal_threshold: Number(document.getElementById("abnormal-threshold").value),
     },
     refresh: {
+      interval: document.getElementById("refresh-interval").value,
       lead_time: document.getElementById("lead-time").value,
       inter_refresh_delay_min: document.getElementById("delay-min").value,
       inter_refresh_delay_max: document.getElementById("delay-max").value,

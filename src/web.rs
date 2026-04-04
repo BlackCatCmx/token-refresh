@@ -135,7 +135,13 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
 
     if !config.web.enabled {
         let _ = logger.runtime("info", "web interface disabled; scheduler-only mode active");
-        scheduler.spawn_background(config_manager.clone(), store, transaction, logger);
+        scheduler.spawn_background(
+            config_manager.clone(),
+            store,
+            status_store,
+            transaction,
+            logger,
+        );
         tokio::signal::ctrl_c().await?;
         return Ok(());
     }
@@ -158,7 +164,7 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         session_manager,
         _service_lock: service_lock,
     });
-    scheduler.spawn_background(config_manager, store, transaction, logger);
+    scheduler.spawn_background(config_manager, store, status_store, transaction, logger);
 
     let app = api::router(state);
     axum::serve(listener, app)

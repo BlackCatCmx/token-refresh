@@ -333,9 +333,11 @@ fn merge_refresh_response(
 pub fn due_at(
     config: &AppConfig,
     credential: &CodexCredentialFile,
+    now: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>> {
+    let refresh_interval = parse_duration_str(&config.refresh.interval)?;
     let lead_time = parse_duration_str(&config.refresh.lead_time)?;
-    Ok(credential.due_at(lead_time))
+    Ok(credential.due_at(lead_time, refresh_interval, now))
 }
 
 #[cfg(test)]
@@ -404,5 +406,42 @@ mod tests {
         assert_eq!(credential.id_token, new_id);
         assert_eq!(credential.email.as_deref(), Some("new@example.com"));
         assert_eq!(credential.account_id.as_deref(), Some("acc-123"));
+    }
+
+    #[test]
+    fn due_at_uses_refresh_interval_when_earlier_than_expiry_window() {
+        let now = Utc::now();
+        let mut config = AppConfig::default();
+        config.refresh.interval = "6h".to_string();
+        config.refresh.lead_time = "24h".to_string();
+        let credential = CodexCredentialFile {
+            access_token: fake_jwt(json!({ "exp": (now + ChronoDuration::hours(72)).timestamp() })),
+            last_refresh: Some((now - ChronoDuration::hours(7)).to_rfc3339()),
+            provider_type: "codex".to_string(),
+            ..CodexCredentialFile::default()
+        };
+
+        let due = due_at(&config, &credential, now).unwrap().unwrap();
+
+        assert!(due <= now);
+    }
+
+    #[test]
+    fn due_at_defaults_to_immediate_refresh_when_last_refresh_missing() {
+        let now = Utc::now();
+        let mut config = AppConfig::default();
+        config.refresh.interval = "6h".to_string();
+        config.refresh.lead_time = "24h".to_string();
+        let credential = CodexCredentialFile {
+            access_token: fake_jwt(
+                json!({ "exp": (now + ChronoDuration::hours(240)).timestamp() }),
+            ),
+            provider_type: "codex".to_string(),
+            ..CodexCredentialFile::default()
+        };
+
+        let due = due_at(&config, &credential, now).unwrap().unwrap();
+
+        assert!(due <= now);
     }
 }

@@ -57,9 +57,30 @@ impl CodexCredentialFile {
             .or_else(|| jwt::decode_expiration(&self.id_token).ok())
     }
 
-    pub fn due_at(&self, lead_time: std::time::Duration) -> Option<DateTime<Utc>> {
-        let expires_at = self.expires_at()?;
-        Some(expires_at - chrono::Duration::from_std(lead_time).ok()?)
+    pub fn last_refresh_at(&self) -> Option<DateTime<Utc>> {
+        self.last_refresh.as_deref().and_then(parse_rfc3339)
+    }
+
+    pub fn due_at(
+        &self,
+        lead_time: std::time::Duration,
+        refresh_interval: std::time::Duration,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        let interval_due = self
+            .last_refresh_at()
+            .and_then(|value| {
+                chrono::Duration::from_std(refresh_interval)
+                    .ok()
+                    .map(|delta| value + delta)
+            })
+            .unwrap_or(now);
+        let expires_due = self.expires_at().and_then(|value| {
+            chrono::Duration::from_std(lead_time)
+                .ok()
+                .map(|delta| value - delta)
+        });
+        Some(expires_due.map_or(interval_due, |value| value.min(interval_due)))
     }
 
     pub fn set_last_refresh_now(&mut self) {

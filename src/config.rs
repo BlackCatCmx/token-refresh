@@ -139,6 +139,8 @@ impl Default for CredentialManagementConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RefreshConfig {
+    #[serde(default = "default_refresh_interval")]
+    pub interval: String,
     #[serde(default = "default_lead_time")]
     pub lead_time: String,
     #[serde(default = "default_min_sleep")]
@@ -156,6 +158,7 @@ pub struct RefreshConfig {
 impl Default for RefreshConfig {
     fn default() -> Self {
         Self {
+            interval: default_refresh_interval(),
             lead_time: default_lead_time(),
             min_sleep: default_min_sleep(),
             max_sleep: default_max_sleep(),
@@ -210,6 +213,7 @@ pub struct EditableSettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EditableRefreshConfig {
+    pub interval: String,
     pub lead_time: String,
     pub inter_refresh_delay_min: String,
     pub inter_refresh_delay_max: String,
@@ -225,6 +229,7 @@ impl From<&AppConfig> for EditableSettings {
             proxy: value.proxy.clone(),
             credential_management: value.credential_management.clone(),
             refresh: EditableRefreshConfig {
+                interval: value.refresh.interval.clone(),
                 lead_time: value.refresh.lead_time.clone(),
                 inter_refresh_delay_min: value.refresh.inter_refresh_delay_min.clone(),
                 inter_refresh_delay_max: value.refresh.inter_refresh_delay_max.clone(),
@@ -378,6 +383,7 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
     if config.credential_management.abnormal_threshold == 0 {
         bail!("credential_management.abnormal_threshold must be >= 1");
     }
+    parse_duration_str(&config.refresh.interval)?;
     parse_duration_str(&config.refresh.lead_time)?;
     parse_duration_str(&config.refresh.min_sleep)?;
     parse_duration_str(&config.refresh.max_sleep)?;
@@ -520,6 +526,9 @@ fn diff_editable_settings(current: &EditableSettings, incoming: &EditableSetting
     {
         changed.push("credential_management.abnormal_threshold".to_string());
     }
+    if current.refresh.interval != incoming.refresh.interval {
+        changed.push("refresh.interval".to_string());
+    }
     if current.refresh.lead_time != incoming.refresh.lead_time {
         changed.push("refresh.lead_time".to_string());
     }
@@ -544,6 +553,7 @@ fn apply_editable_settings(config: &mut AppConfig, settings: EditableSettings) {
     config.request_identity = settings.request_identity;
     config.proxy = settings.proxy;
     config.credential_management = settings.credential_management;
+    config.refresh.interval = settings.refresh.interval;
     config.refresh.lead_time = settings.refresh.lead_time;
     config.refresh.inter_refresh_delay_min = settings.refresh.inter_refresh_delay_min;
     config.refresh.inter_refresh_delay_max = settings.refresh.inter_refresh_delay_max;
@@ -597,6 +607,10 @@ fn default_proxy_mode() -> String {
 
 fn default_abnormal_threshold() -> u32 {
     1
+}
+
+fn default_refresh_interval() -> String {
+    "6h".to_string()
 }
 
 fn default_lead_time() -> String {
@@ -688,6 +702,13 @@ mod tests {
         assert!(validate_config(&config).is_err());
 
         config.log_level = "trace".to_string();
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_config_rejects_invalid_refresh_interval() {
+        let mut config = AppConfig::default();
+        config.refresh.interval = "later".to_string();
         assert!(validate_config(&config).is_err());
     }
 }
