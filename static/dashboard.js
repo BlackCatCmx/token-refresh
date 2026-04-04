@@ -32,9 +32,11 @@ async function loadScheduler() {
   container.innerHTML = `
     <span class="status-label">自动刷新</span>
     <span class="${data.enabled ? "status-on" : "status-off"}">${data.enabled ? "运行中" : "已停止"}</span>
-    <span class="status-label">当前账号</span>
+    <span class="status-label">参与调度账号数</span>
+    <span>${escapeHtml(data.scheduled_credential_count ?? "—")}</span>
+    <span class="status-label">当前刷新账号</span>
     <span>${escapeHtml(data.current_key || "无")}</span>
-    <span class="status-label">下次唤醒</span>
+    <span class="status-label">下一个账号刷新时间</span>
     <span>${escapeHtml(data.next_wake_at ? shortTime(data.next_wake_at) : "待定")}</span>
     <span class="status-label">最近错误</span>
     <span${data.last_error ? ' class="danger-text"' : ""}>${escapeHtml(data.last_error || "无")}</span>

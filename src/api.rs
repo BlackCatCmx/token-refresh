@@ -636,7 +636,23 @@ async fn stop_scheduler(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn scheduler_status(State(state): State<Arc<AppState>>) -> Response {
-    Json(state.scheduler.status().await).into_response()
+    let status = state.scheduler.status().await;
+    let scheduled_credential_count = match state.store.scan_zone(CredentialZone::Normal) {
+        Ok(entries) => entries.len(),
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    };
+    Json(SchedulerStatusResponse {
+        status,
+        scheduled_credential_count,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Serialize)]
+struct SchedulerStatusResponse {
+    #[serde(flatten)]
+    status: crate::scheduler::SchedulerStatus,
+    scheduled_credential_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
