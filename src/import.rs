@@ -145,6 +145,7 @@ pub fn patch_user_agents(
                     summary.unchanged += 1;
                     continue;
                 };
+                // Avoid a no-op write if the random version pick matched the current UA.
                 if updated_user_agent == current_user_agent {
                     summary.unchanged += 1;
                     continue;

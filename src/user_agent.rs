@@ -218,8 +218,10 @@ pub fn reassign_cli_version(
     if parse_version_number(current_version).is_err() {
         return Ok(None);
     }
-    let next_version = pick_rule_version(&rules.versions, true)?;
-    Ok(Some(format!("{originator}/{next_version} {suffix}")))
+    let next_version = pick_rule_version(&rules.versions)?;
+    let updated = format!("{originator}/{next_version} {suffix}");
+    validate(&updated)?;
+    Ok(Some(updated))
 }
 
 pub fn preview_value(
@@ -284,12 +286,12 @@ fn pick_generated_candidate(
     Ok(candidates[index].clone())
 }
 
-fn pick_rule_version(value: &str, randomize: bool) -> Result<String> {
+fn pick_rule_version(value: &str) -> Result<String> {
     let versions = parse_version_tokens(value)?;
     if versions.is_empty() {
         bail!("User-Agent generated versions cannot be empty");
     }
-    if !randomize || versions.len() == 1 {
+    if versions.len() == 1 {
         return Ok(versions[0].clone());
     }
     let index = rand::rng().random_range(0..versions.len());
