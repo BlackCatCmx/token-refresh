@@ -249,19 +249,32 @@ async function manualRefresh(name, btn) {
   const originalText = btn.textContent;
   btn.disabled = true;
   btn.textContent = "刷新中…";
+
+  // 分离主请求与页面重载，避免 refreshAll 失败污染刷新结果判断
+  let success = false;
   try {
     await api("api/credentials/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: decodeURIComponent(name) }),
     });
-    await refreshAll();
-    showToast("刷新成功");
+    success = true;
   } catch (error) {
-    btn.disabled = false;
-    btn.textContent = originalText;
     showToast(error.message, "error");
   }
+
+  // 无论成功失败都重拉，同步后端最新状态（失败计数、异常区迁移等）
+  try {
+    await refreshAll();
+  } catch {
+    // 页面重载失败时，若主请求也失败，按钮卡片未重渲染，需手动恢复以允许重试
+    if (!success) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  }
+
+  if (success) showToast("刷新成功");
 }
 
 async function restoreCredential(name) {
