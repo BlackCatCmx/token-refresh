@@ -286,6 +286,7 @@ async function importFiles() {
   const input = document.getElementById("upload-files");
   if (!input.files.length) return alert("请选择文件");
   const files = Array.from(input.files);
+  input.value = "";
   const zips = files.filter((f) => f.name.toLowerCase().endsWith(".zip"));
   const jsons = files.filter((f) => f.name.toLowerCase().endsWith(".json"));
   if (zips.length > 0 && jsons.length > 0) {
@@ -305,7 +306,6 @@ async function importFiles() {
   } else {
     return alert("请选择 .json 或 .zip 文件");
   }
-  input.value = "";
   await refreshAll();
 }
 
