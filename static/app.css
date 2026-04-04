@@ -26,10 +26,21 @@ body::before {
 /* ── Header ── */
 header {
   padding: 22px 24px 14px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: start;
   gap: 16px;
+}
+
+.header-copy {
+  grid-column: 2;
+  text-align: center;
+}
+
+.header-actions {
+  grid-column: 3;
+  justify-self: end;
+  margin-bottom: 0;
 }
 
 h1 {
@@ -50,6 +61,7 @@ h2 {
 nav.tabs {
   display: flex;
   gap: 0;
+  justify-content: center;
   padding: 0 24px;
   border-bottom: 1px solid #e2e8f0;
 }
@@ -385,11 +397,25 @@ select:disabled, input:disabled, textarea:disabled {
   margin-bottom: 6px;
 }
 
+.modal-close {
+  min-width: 42px;
+  padding-left: 0;
+  padding-right: 0;
+}
+
 .modal-textarea {
   min-height: 58vh;
   margin-top: 14px;
   font-family: "Consolas", "SFMono-Regular", "Liberation Mono", monospace;
   line-height: 1.55;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
 }
 
 /* ── Pre / Log ── */
@@ -509,7 +535,12 @@ pre {
   .tab-panel--status { grid-template-columns: 1fr; }
 
   header, nav.tabs, main { padding-left: 16px; padding-right: 16px; }
-  header { flex-direction: column; align-items: stretch; }
+  header {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .header-copy { text-align: left; }
   .tab-btn { padding: 9px 14px; font-size: 13px; }
   .section-header { flex-direction: column; align-items: flex-start; gap: 8px; }
   .modal-dialog { margin: 16px auto; padding: 16px; }

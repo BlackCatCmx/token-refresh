@@ -9,11 +9,11 @@
 <body>
   <div class="page-wrap">
   <header>
-    <div>
+    <div class="header-copy">
       <h1>Codex Refresh 控制台</h1>
       <div class="muted">上传凭证、查看状态、调参数、手动刷新、处理异常区都在这里。</div>
     </div>
-    <div class="toolbar">
+    <div class="toolbar header-actions">
       <button type="button" class="secondary" onclick="refreshAll()">刷新页面数据</button>
       <button type="button" class="danger" onclick="logout()">退出</button>
     </div>
@@ -170,12 +170,12 @@
           <h2 id="credential-editor-title">编辑凭证</h2>
           <div id="credential-editor-meta" class="muted"></div>
         </div>
-        <button type="button" class="secondary" onclick="closeCredentialEditor()">取消</button>
+        <button type="button" class="secondary modal-close" aria-label="关闭" onclick="closeCredentialEditor()">X</button>
       </div>
       <textarea id="credential-editor-content" class="modal-textarea" spellcheck="false" placeholder="在这里编辑 JSON 内容"></textarea>
-      <div class="toolbar toolbar-top">
-        <button type="button" onclick="saveCredentialEditor()">保存</button>
+      <div class="modal-footer">
         <button type="button" class="secondary" onclick="closeCredentialEditor()">取消</button>
+        <button type="button" onclick="saveCredentialEditor()">保存</button>
       </div>
     </div>
   </div>
