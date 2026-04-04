@@ -37,6 +37,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(fill_missing_credential_user_agents),
         )
         .route(
+            "/api/credentials/user-agent/reassign-cli-version",
+            post(reassign_credential_cli_versions),
+        )
+        .route(
             "/api/credentials/user-agent/reassign",
             post(reassign_credential_user_agents),
         )
@@ -339,6 +343,10 @@ async fn fill_missing_credential_user_agents(State(state): State<Arc<AppState>>)
     patch_credential_user_agents(state, UserAgentPatchMode::FillMissing).await
 }
 
+async fn reassign_credential_cli_versions(State(state): State<Arc<AppState>>) -> Response {
+    patch_credential_user_agents(state, UserAgentPatchMode::ReassignCliVersion).await
+}
+
 async fn reassign_credential_user_agents(State(state): State<Arc<AppState>>) -> Response {
     patch_credential_user_agents(state, UserAgentPatchMode::ForceReassign).await
 }
@@ -357,6 +365,9 @@ async fn patch_credential_user_agents(state: Arc<AppState>, mode: UserAgentPatch
         }) => {
             let action = match mode {
                 UserAgentPatchMode::FillMissing => "filled missing credential user agents",
+                UserAgentPatchMode::ReassignCliVersion => {
+                    "reassigned credential user agent cli versions"
+                }
                 UserAgentPatchMode::ForceReassign => "reassigned credential user agents",
             };
             let _ = state.logger.runtime(
@@ -529,7 +540,10 @@ async fn get_credential_content(
                 content,
             })
             .into_response(),
-            Err(err) => json_error(StatusCode::BAD_REQUEST, &format!("凭证文件不是有效 UTF-8: {err}")),
+            Err(err) => json_error(
+                StatusCode::BAD_REQUEST,
+                &format!("凭证文件不是有效 UTF-8: {err}"),
+            ),
         },
         Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     }
@@ -867,8 +881,7 @@ fn download_response(content_type: &str, file_name: impl Into<String>, bytes: Ve
 }
 
 fn validate_credential_content(content: &str) -> Result<()> {
-    let credential: CodexCredentialFile =
-        serde_json::from_str(content).context("JSON 格式错误")?;
+    let credential: CodexCredentialFile = serde_json::from_str(content).context("JSON 格式错误")?;
     if !credential.is_codex() {
         anyhow::bail!("只允许保存 type 为 codex 的凭证文件");
     }

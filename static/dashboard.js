@@ -422,11 +422,18 @@ async function fillMissingUserAgents() {
   alert(formatUserAgentPatchMessage("补充 UA", data));
 }
 
+async function reassignCliVersions() {
+  if (!confirm("这会只重写 UA 里的 codex_cli_rs/version 段，系统和终端信息保持不变。确认继续吗？")) return;
+  const data = await api("api/credentials/user-agent/reassign-cli-version", { method: "POST" });
+  await refreshAll();
+  alert(formatUserAgentPatchMessage("重配 UA-cx 版本", data));
+}
+
 async function reassignAllUserAgents() {
   if (!confirm("这会强制重写全部凭证的 UA，包括原来已有 UA 的。确认继续吗？")) return;
   const data = await api("api/credentials/user-agent/reassign", { method: "POST" });
   await refreshAll();
-  alert(formatUserAgentPatchMessage("强制重配 UA", data));
+  alert(formatUserAgentPatchMessage("重配 UA-全量", data));
 }
 
 async function reloadLog(kind) {
@@ -486,6 +493,7 @@ window.closeCredentialEditor = closeCredentialEditor;
 window.saveCredentialEditor = saveCredentialEditor;
 window.importFiles = importFiles;
 window.fillMissingUserAgents = fillMissingUserAgents;
+window.reassignCliVersions = reassignCliVersions;
 window.reassignAllUserAgents = reassignAllUserAgents;
 window.reloadLog = reloadLog;
 window.downloadLog = downloadLog;

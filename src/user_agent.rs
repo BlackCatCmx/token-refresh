@@ -195,6 +195,33 @@ pub fn assign(
     }
 }
 
+pub fn reassign_cli_version(
+    existing_user_agent: &str,
+    originator: &str,
+    rules: &UserAgentRulesConfig,
+) -> Result<Option<String>> {
+    let existing_user_agent = existing_user_agent.trim();
+    if existing_user_agent.is_empty() {
+        return Ok(None);
+    }
+    let originator = originator.trim();
+    if originator.is_empty() {
+        bail!("User-Agent originator cannot be empty");
+    }
+    let prefix = format!("{originator}/");
+    let Some(remainder) = existing_user_agent.strip_prefix(&prefix) else {
+        return Ok(None);
+    };
+    let Some((current_version, suffix)) = remainder.split_once(' ') else {
+        return Ok(None);
+    };
+    if parse_version_number(current_version).is_err() {
+        return Ok(None);
+    }
+    let next_version = pick_rule_version(&rules.versions, true)?;
+    Ok(Some(format!("{originator}/{next_version} {suffix}")))
+}
+
 pub fn preview_value(
     originator: &str,
     mode: &str,
@@ -255,6 +282,18 @@ fn pick_generated_candidate(
     }
     let index = rand::rng().random_range(0..candidates.len());
     Ok(candidates[index].clone())
+}
+
+fn pick_rule_version(value: &str, randomize: bool) -> Result<String> {
+    let versions = parse_version_tokens(value)?;
+    if versions.is_empty() {
+        bail!("User-Agent generated versions cannot be empty");
+    }
+    if !randomize || versions.len() == 1 {
+        return Ok(versions[0].clone());
+    }
+    let index = rand::rng().random_range(0..versions.len());
+    Ok(versions[index].clone())
 }
 
 fn generate_candidates(originator: &str, rules: &UserAgentRulesConfig) -> Result<Vec<String>> {
@@ -519,5 +558,53 @@ mod tests {
             terminals: "windows terminal\nwarp".to_string(),
         };
         validate_settings("codex_cli_rs", "generated", "", &rules).unwrap();
+    }
+
+    #[test]
+    fn reassign_cli_version_only_replaces_version_segment() {
+        let rules = UserAgentRulesConfig {
+            versions: "9.9.9".to_string(),
+            ..UserAgentRulesConfig::default()
+        };
+        let updated = reassign_cli_version(
+            "codex_cli_rs/0.118.0 (Windows 10.0.19045; x86_64) WezTerm",
+            "codex_cli_rs",
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(
+            updated.as_deref(),
+            Some("codex_cli_rs/9.9.9 (Windows 10.0.19045; x86_64) WezTerm")
+        );
+    }
+
+    #[test]
+    fn reassign_cli_version_skips_non_matching_originator() {
+        let rules = UserAgentRulesConfig {
+            versions: "9.9.9".to_string(),
+            ..UserAgentRulesConfig::default()
+        };
+        let updated = reassign_cli_version(
+            "custom_cli/0.118.0 (Windows 10.0.19045; x86_64) WezTerm",
+            "codex_cli_rs",
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(updated, None);
+    }
+
+    #[test]
+    fn reassign_cli_version_skips_invalid_version_segment() {
+        let rules = UserAgentRulesConfig {
+            versions: "9.9.9".to_string(),
+            ..UserAgentRulesConfig::default()
+        };
+        let updated = reassign_cli_version(
+            "codex_cli_rs/not-a-version (Windows 10.0.19045; x86_64) WezTerm",
+            "codex_cli_rs",
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(updated, None);
     }
 }

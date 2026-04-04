@@ -18,6 +18,7 @@ pub struct ImportedFile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UserAgentPatchMode {
     FillMissing,
+    ReassignCliVersion,
     ForceReassign,
 }
 
@@ -117,20 +118,47 @@ pub fn patch_user_agents(
             summary.skipped_invalid += 1;
             continue;
         };
-        let should_update = match mode {
-            UserAgentPatchMode::FillMissing => credential.normalized_user_agent().is_none(),
-            UserAgentPatchMode::ForceReassign => true,
+        let next_user_agent = match mode {
+            UserAgentPatchMode::FillMissing => {
+                if credential.normalized_user_agent().is_some() {
+                    summary.unchanged += 1;
+                    continue;
+                }
+                user_agent::assign(
+                    &request_identity.originator,
+                    &request_identity.user_agent_mode,
+                    &request_identity.user_agent,
+                    &request_identity.user_agent_rules,
+                )?
+            }
+            UserAgentPatchMode::ReassignCliVersion => {
+                let Some(current_user_agent) = credential.normalized_user_agent() else {
+                    summary.unchanged += 1;
+                    continue;
+                };
+                let Some(updated_user_agent) = user_agent::reassign_cli_version(
+                    current_user_agent,
+                    &request_identity.originator,
+                    &request_identity.user_agent_rules,
+                )?
+                else {
+                    summary.unchanged += 1;
+                    continue;
+                };
+                if updated_user_agent == current_user_agent {
+                    summary.unchanged += 1;
+                    continue;
+                }
+                updated_user_agent
+            }
+            UserAgentPatchMode::ForceReassign => user_agent::assign(
+                &request_identity.originator,
+                &request_identity.user_agent_mode,
+                &request_identity.user_agent,
+                &request_identity.user_agent_rules,
+            )?,
         };
-        if !should_update {
-            summary.unchanged += 1;
-            continue;
-        }
-        credential.user_agent = Some(user_agent::assign(
-            &request_identity.originator,
-            &request_identity.user_agent_mode,
-            &request_identity.user_agent,
-            &request_identity.user_agent_rules,
-        )?);
+        credential.user_agent = Some(next_user_agent);
         store.write_credential(entry.zone, &entry.key, &credential)?;
         summary.updated += 1;
     }
@@ -158,6 +186,16 @@ mod tests {
                 versions: "0.118.0".to_string(),
                 profiles: "windows10".to_string(),
                 terminals: "WindowsTerminal".to_string(),
+            },
+            ..RequestIdentityConfig::default()
+        }
+    }
+
+    fn request_identity_with_version(version: &str) -> RequestIdentityConfig {
+        RequestIdentityConfig {
+            user_agent_rules: crate::user_agent::UserAgentRulesConfig {
+                versions: version.to_string(),
+                ..crate::user_agent::UserAgentRulesConfig::default()
             },
             ..RequestIdentityConfig::default()
         }
@@ -383,6 +421,73 @@ mod tests {
                 .as_ref()
                 .and_then(|credential| credential.user_agent.as_deref()),
             Some("new-ua")
+        );
+    }
+
+    #[test]
+    fn reassign_cli_version_only_updates_matching_user_agents() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+
+        let matching = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            email: Some("matching@example.com".to_string()),
+            user_agent: Some(
+                "codex_cli_rs/0.118.0 (Windows 10.0.19045; x86_64) WindowsTerminal".to_string(),
+            ),
+            ..CodexCredentialFile::default()
+        };
+        let custom = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            email: Some("custom@example.com".to_string()),
+            user_agent: Some("custom-ua".to_string()),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "matching.json", &matching)
+            .unwrap();
+        store
+            .write_credential(CredentialZone::Abnormal, "custom.json", &custom)
+            .unwrap();
+
+        let summary = patch_user_agents(
+            &store,
+            &request_identity_with_version("9.9.9"),
+            UserAgentPatchMode::ReassignCliVersion,
+        )
+        .unwrap();
+        assert_eq!(
+            summary,
+            UserAgentPatchSummary {
+                updated: 1,
+                unchanged: 1,
+                skipped_invalid: 0,
+            }
+        );
+        assert_eq!(
+            store
+                .read_entry(CredentialZone::Normal, "matching.json")
+                .unwrap()
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_agent.as_deref()),
+            Some("codex_cli_rs/9.9.9 (Windows 10.0.19045; x86_64) WindowsTerminal")
+        );
+        assert_eq!(
+            store
+                .read_entry(CredentialZone::Abnormal, "custom.json")
+                .unwrap()
+                .credential
+                .as_ref()
+                .and_then(|credential| credential.user_agent.as_deref()),
+            Some("custom-ua")
         );
     }
 
