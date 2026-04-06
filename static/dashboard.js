@@ -1,5 +1,16 @@
 let schedulerPollTimer = null;
 let schedulerManualActive = false;
+// Keep this aligned with the backend clamp in src/api.rs.
+const LOG_LINE_LIMIT = 50;
+// Deterministic abnormal credential codes mirrored from backend refresh classification.
+const ABNORMAL_LOG_CODES = [
+  "refresh_token_expired",
+  "refresh_token_reused",
+  "refresh_token_invalidated",
+  "missing_refresh_token",
+  "invalid_json",
+  "invalid_user_agent",
+];
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -496,8 +507,8 @@ async function reassignAllUserAgents() {
 }
 
 async function reloadLog(kind) {
-  const data = await api(`api/logs?kind=${kind}&limit=120`);
-  document.getElementById(`${kind}-log`).textContent = data.content || "";
+  const data = await api(`api/logs?kind=${kind}&limit=${LOG_LINE_LIMIT}`);
+  renderLog(kind, data.content || "");
 }
 
 function downloadLog(kind) {
@@ -525,6 +536,47 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function classifyLogLine(line) {
+  const normalized = line.toLowerCase();
+  if (normalized.includes("refresh succeeded") || normalized.includes("refresh_success")) {
+    return "success";
+  }
+  if (
+    normalized.includes("[error]") ||
+    normalized.includes("count_towards_abnormal=true") ||
+    normalized.includes("moved_to_abnormal=true") ||
+    normalized.includes("final_zone=abnormal") ||
+    ABNORMAL_LOG_CODES.some((code) => normalized.includes(code))
+  ) {
+    return "error";
+  }
+  if (
+    normalized.includes("[warn]") ||
+    normalized.includes("refresh failed") ||
+    normalized.includes("refresh_failed")
+  ) {
+    return "warn";
+  }
+  return "";
+}
+
+function renderLog(kind, content) {
+  const container = document.getElementById(`${kind}-log`);
+  if (!content) {
+    container.textContent = "";
+    return;
+  }
+  container.innerHTML = content
+    .split(/\r?\n/)
+    .map((line) => {
+      const tone = classifyLogLine(line);
+      const className = tone ? `log-line log-line--${tone}` : "log-line";
+      return `<span class="${className}">${line ? escapeHtml(line) : "&nbsp;"}</span>`;
+    })
+    .join("\n");
+  container.scrollTop = container.scrollHeight;
 }
 
 function switchTab(tabId) {

@@ -23,6 +23,8 @@ use crate::import::{
 use crate::logging::LogKind;
 use crate::web::{AppState, app_css, dashboard_js, dashboard_page, login_js, login_page};
 
+const LOG_LINE_LIMIT: usize = 50;
+
 pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/api/session/logout", post(logout))
@@ -700,12 +702,17 @@ struct LogsResponse {
     content: String,
 }
 
+fn clamp_log_line_limit(limit: Option<usize>) -> usize {
+    limit.map(|value| value.min(LOG_LINE_LIMIT))
+        .unwrap_or(LOG_LINE_LIMIT)
+}
+
 async fn get_logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQuery>) -> Response {
     let kind = match LogKind::parse(query.kind.trim()) {
         Ok(kind) => kind,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     };
-    match state.logger.read_tail(kind, query.limit.unwrap_or(100)) {
+    match state.logger.read_tail(kind, clamp_log_line_limit(query.limit)) {
         Ok(content) => Json(LogsResponse {
             kind: query.kind,
             content,
@@ -927,5 +934,20 @@ mod tests {
     fn validate_credential_content_rejects_non_codex_json() {
         let raw = r#"{"type":"other","access_token":"a","refresh_token":"b"}"#;
         assert!(validate_credential_content(raw).is_err());
+    }
+
+    #[test]
+    fn clamp_log_line_limit_uses_default_when_missing() {
+        assert_eq!(clamp_log_line_limit(None), 50);
+    }
+
+    #[test]
+    fn clamp_log_line_limit_caps_large_values() {
+        assert_eq!(clamp_log_line_limit(Some(120)), 50);
+    }
+
+    #[test]
+    fn clamp_log_line_limit_keeps_small_values() {
+        assert_eq!(clamp_log_line_limit(Some(12)), 12);
     }
 }

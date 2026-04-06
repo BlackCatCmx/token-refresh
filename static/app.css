@@ -500,6 +500,10 @@ pre {
   margin: 0;
 }
 
+.log-line--success { color: #86efac; }
+.log-line--error { color: #fca5a5; }
+.log-line--warn { color: #fde68a; }
+
 /* ── Misc ── */
 .muted { color: #64748b; font-size: 14px; }
 
