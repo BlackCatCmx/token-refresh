@@ -119,12 +119,14 @@ async function loadBackupStatus() {
 }
 
 function formatDailyBackupStatus(data) {
+  if (!data.enabled) return "未启用";
+  if (!data.configured) return "配置未完成";
   if (!data.next_daily_at) return "未启用";
   const displayTime = shortTime(data.next_daily_at);
   const dueAt = new Date(data.next_daily_at);
   if (isNaN(dueAt.getTime())) return displayTime;
   if (dueAt.getTime() <= Date.now()) {
-    return `${data.running ? "今日执行中" : "今日待执行"}（计划点 ${displayTime}）`;
+    return `${data.running ? "今日执行中" : "已到执行时间，等待执行"}（今日计划点 ${displayTime}）`;
   }
   return displayTime;
 }

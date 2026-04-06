@@ -172,11 +172,15 @@ impl BackupCoordinator {
         let config = self.inner.config_manager.effective_config().await;
         let configured = is_backup_remote_configured(&config.backup);
         let now = Utc::now();
-        let next_daily_at = compute_next_daily_at(
-            &config.backup,
-            *self.inner.last_daily_backup_for.read().await,
-            now,
-        );
+        let next_daily_at = if config.backup.enabled && configured {
+            compute_next_daily_at(
+                &config.backup,
+                *self.inner.last_daily_backup_for.read().await,
+                now,
+            )
+        } else {
+            None
+        };
         {
             let mut status = self.inner.status.write().await;
             status.enabled = config.backup.enabled;
