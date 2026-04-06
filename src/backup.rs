@@ -430,7 +430,6 @@ fn ensure_backup_ready(backup: &BackupConfig) -> Result<&BackupConfig> {
 fn is_backup_remote_configured(backup: &BackupConfig) -> bool {
     backup.remote.kind.trim() == "s3_compatible"
         && !backup.remote.endpoint.trim().is_empty()
-        && !backup.remote.region.trim().is_empty()
         && !backup.remote.bucket.trim().is_empty()
         && !backup.remote.access_key_id.trim().is_empty()
         && !backup.remote.secret_access_key.trim().is_empty()
