@@ -646,6 +646,38 @@ pre {
   margin-top: 8px;
 }
 
+/* ── Collapsible Settings Group ── */
+details.settings-group-collapsible > summary {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  margin: 20px 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f1f5f9;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+details.settings-group-collapsible > summary::-webkit-details-marker { display: none; }
+
+details.settings-group-collapsible > summary::after {
+  content: '▶';
+  font-size: 9px;
+  transition: transform 0.15s;
+}
+
+details.settings-group-collapsible[open] > summary::after { transform: rotate(90deg); }
+
+details.settings-group-collapsible > summary:hover { color: #475569; }
+
+details.settings-group-collapsible > .grid { margin-top: 4px; }
+
 /* ── Responsive ── */
 @media (max-width: 800px) {
   .tab-panel--status { grid-template-columns: 1fr; }

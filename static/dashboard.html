@@ -120,17 +120,6 @@
       <section>
         <h2>设置</h2>
 
-        <h3 class="settings-group-title">请求标识</h3>
-        <div class="grid">
-          <div><label>originator</label><input type="text" id="originator"></div>
-          <div><label>UA 模式</label><select id="user-agent-mode" onchange="syncUserAgentMode()"><option value="list">list：手写列表</option><option value="generated">generated：按规则生成</option></select></div>
-          <details id="user-agent-list-group" class="grid-full field-expand"><summary>User-Agent 列表</summary><textarea id="user-agent" rows="6" placeholder="一行一个 User-Agent；上传缺失时随机分配"></textarea></details>
-          <div id="user-agent-versions-group" class="grid-full" hidden><label>CLI 版本规则</label><textarea id="user-agent-versions" rows="3" placeholder="一行一个版本，或一行一个范围，例如 0.114.0 - 0.118.0；跨 minor 范围时两端 patch 必须为 .0"></textarea></div>
-          <div id="user-agent-profiles-group" class="grid-full" hidden><label>系统档案</label><textarea id="user-agent-profiles" rows="3" placeholder="一行一个：windows10 / windows11 / macos / ubuntu / debian"></textarea></div>
-          <div id="user-agent-terminals-group" class="grid-full" hidden><label>终端列表</label><textarea id="user-agent-terminals" rows="3" placeholder="一行一个：WindowsTerminal / Apple_Terminal / iTerm.app / vscode / WezTerm / Ghostty / WarpTerminal / kitty"></textarea></div>
-        </div>
-        <div id="user-agent-mode-hint" class="muted"></div>
-
         <h3 class="settings-group-title">日志</h3>
         <div class="grid">
           <div><label>日志级别</label><select id="log-level"><option value="info">info（最详细）</option><option value="warn">warn</option><option value="error">error</option></select></div>
@@ -190,6 +179,19 @@
             <div class="muted advanced-hint">Claw Cloud 建议保留 <code>Path-style=true</code>。Region 留空时会优先从 Endpoint 自动识别。</div>
           </details>
         </div>
+
+        <details class="settings-group-collapsible">
+          <summary>请求标识</summary>
+          <div class="grid">
+            <div><label>originator</label><input type="text" id="originator"></div>
+            <div><label>UA 模式</label><select id="user-agent-mode" onchange="syncUserAgentMode()"><option value="list">list：手写列表</option><option value="generated">generated：按规则生成</option></select></div>
+            <details id="user-agent-list-group" class="grid-full field-expand"><summary>User-Agent 列表</summary><textarea id="user-agent" rows="6" placeholder="一行一个 User-Agent；上传缺失时随机分配"></textarea></details>
+            <div id="user-agent-versions-group" class="grid-full" hidden><label>CLI 版本规则</label><textarea id="user-agent-versions" rows="3" placeholder="一行一个版本，或一行一个范围，例如 0.114.0 - 0.118.0；跨 minor 范围时两端 patch 必须为 .0"></textarea></div>
+            <div id="user-agent-profiles-group" class="grid-full" hidden><label>系统档案</label><textarea id="user-agent-profiles" rows="3" placeholder="一行一个：windows10 / windows11 / macos / ubuntu / debian"></textarea></div>
+            <div id="user-agent-terminals-group" class="grid-full" hidden><label>终端列表</label><textarea id="user-agent-terminals" rows="3" placeholder="一行一个：WindowsTerminal / Apple_Terminal / iTerm.app / vscode / WezTerm / Ghostty / WarpTerminal / kitty"></textarea></div>
+          </div>
+          <div id="user-agent-mode-hint" class="muted"></div>
+        </details>
 
         <div class="toolbar toolbar-top">
           <button type="button" onclick="saveSettings()">保存设置</button>
