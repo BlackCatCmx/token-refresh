@@ -104,16 +104,34 @@ async function loadScheduler() {
 async function loadBackupStatus() {
   const data = await api("api/backup/status");
   backupStatusCache = data;
-  const lines = [];
-  lines.push(`备份功能: ${data.enabled ? "已开启" : "已关闭"}`);
-  lines.push(`远端配置: ${data.configured ? "已就绪" : "未完成"}`);
-  lines.push(`当前状态: ${data.restore_running ? "恢复中" : data.running ? "备份中" : "空闲"}`);
-  lines.push(`最近成功: ${data.last_success_at ? shortTime(data.last_success_at) : "无"}`);
-  lines.push(`日备份计划: ${formatDailyBackupStatus(data)}`);
-  lines.push(`刷新后自动备份: ${formatAfterRefreshBackupStatus(data)}`);
-  lines.push(`待上传改动: ${data.dirty_pending ? "有" : "无"}`);
-  lines.push(`最近错误: ${data.last_error || "无"}`);
-  document.getElementById("backup-meta").textContent = lines.join(" | ");
+
+  function v(text, cls) {
+    return cls ? `<span class="${cls}">${text}</span>` : text;
+  }
+
+  const runState = data.restore_running ? v("恢复中", "status-on")
+                 : data.running         ? v("备份中", "status-on")
+                 : "空闲";
+
+  const items = [
+    ["💾", "备份",  data.enabled    ? v("开启", "status-on")   : v("关闭",   "status-off")],
+    ["☁️",  "远端",  data.configured ? v("就绪", "status-on")   : v("未完成", "danger-text")],
+    ["⚡",  "状态",  runState],
+    ["🕐", "成功",  data.last_success_at ? shortTime(data.last_success_at) : v("无", "status-off")],
+    ["📅", "日备",  formatDailyBackupStatus(data)],
+    ["🔄", "刷新后", formatAfterRefreshBackupStatus(data)],
+    ["📤", "待传",  data.dirty_pending ? v("有", "status-warn") : v("无", "status-off")],
+    ["🔔", "错误",  data.last_error ? v(escapeHtml(data.last_error), "danger-text") : v("无", "status-off")],
+  ];
+
+  const SEP = '<span class="backup-sep">·</span>';
+  const html = items
+    .map(([icon, label, val]) =>
+      `<span class="backup-item">${icon} <span class="muted">${label}:</span> ${val}</span>`
+    )
+    .join(SEP);
+
+  document.getElementById("backup-meta").innerHTML = html;
   const canOperate = Boolean(data.enabled && data.configured && !data.running && !data.restore_running);
   document.getElementById("backup-run-btn").disabled = !canOperate;
   document.getElementById("backup-restore-open-btn").disabled = !canOperate;
@@ -337,6 +355,8 @@ async function loadCredentials(zone) {
   const container = document.getElementById(`${zone}-cards`);
   container.innerHTML = "";
   document.getElementById(`${zone}-select-all`).checked = false;
+  const countEl = document.getElementById(`${zone}-count`);
+  if (countEl) countEl.textContent = `(${data.items.length})`;
   if (data.items.length === 0) {
     container.innerHTML = `<div class="empty-hint">暂无凭证</div>`;
     return;

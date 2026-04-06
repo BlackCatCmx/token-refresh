@@ -578,6 +578,12 @@ pre {
 .status-label { color: #64748b; white-space: nowrap; }
 .status-on    { color: #16a34a; font-weight: 600; }
 .status-off   { color: #94a3b8; }
+.status-warn  { color: #b45309; font-weight: 600; }
+
+.backup-item { white-space: nowrap; }
+.backup-sep  { margin: 0 7px; color: #cbd5e1; }
+
+.cred-count  { margin-left: 6px; font-size: 13px; font-weight: 400; color: #94a3b8; }
 
 .empty-hint {
   text-align: center;
