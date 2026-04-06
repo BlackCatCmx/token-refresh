@@ -453,6 +453,47 @@ select:disabled, input:disabled, textarea:disabled {
   margin-top: 14px;
 }
 
+.backup-snapshot-list {
+  display: grid;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 8px 0 14px;
+}
+
+.backup-snapshot-item {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.backup-snapshot-item label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.backup-snapshot-meta {
+  display: grid;
+  gap: 2px;
+}
+
+.backup-warning-label {
+  display: block;
+  margin-top: 4px;
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+.backup-confirm-input {
+  width: 100%;
+  margin-top: 8px;
+}
+
 /* ── Toast ── */
 #toast-container {
   position: fixed;

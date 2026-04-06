@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use rand::Rng;
 use tokio::sync::{Notify, RwLock};
 
+use crate::backup::BackupCoordinator;
 use crate::config::{ConfigManager, parse_duration_str};
 use crate::credential::parse_rfc3339;
 use crate::credential_store::{CredentialStore, CredentialZone};
@@ -52,6 +53,7 @@ struct SchedulerRuntime {
     store: Arc<CredentialStore>,
     status_store: Arc<CredentialStatusStore>,
     transaction: Arc<RefreshTransaction>,
+    backup: Option<Arc<BackupCoordinator>>,
     logger: Arc<LogManager>,
     enabled: Arc<AtomicBool>,
     manual_busy: Arc<AtomicBool>,
@@ -82,6 +84,7 @@ impl SchedulerHandle {
         store: Arc<CredentialStore>,
         status_store: Arc<CredentialStatusStore>,
         transaction: Arc<RefreshTransaction>,
+        backup: Option<Arc<BackupCoordinator>>,
         logger: Arc<LogManager>,
     ) {
         let runtime = SchedulerRuntime {
@@ -89,6 +92,7 @@ impl SchedulerHandle {
             store,
             status_store,
             transaction,
+            backup,
             logger,
             enabled: self.enabled.clone(),
             manual_busy: self.manual_busy.clone(),
@@ -165,6 +169,11 @@ impl SchedulerHandle {
 
     pub fn wake(&self) {
         self.notify.notify_waiters();
+    }
+
+    pub async fn clear_backoff(&self) {
+        let mut guard = self.backoff_until.write().await;
+        guard.clear();
     }
 }
 
@@ -283,6 +292,11 @@ impl SchedulerRuntime {
                     crate::transaction::RefreshTrigger::Scheduler,
                 )
                 .await?;
+            if outcome.success {
+                if let Some(backup) = &self.backup {
+                    backup.mark_dirty();
+                }
+            }
             self.update_backoff(&config, &outcome).await?;
             {
                 let mut status = self.status.write().await;
@@ -357,6 +371,9 @@ impl SchedulerRuntime {
                     status.manual_processed_count += 1;
                     if outcome.success {
                         status.manual_success_count += 1;
+                        if let Some(backup) = &self.backup {
+                            backup.mark_dirty();
+                        }
                     } else {
                         status.manual_failed_count += 1;
                     }

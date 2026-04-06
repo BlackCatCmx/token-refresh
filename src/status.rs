@@ -151,6 +151,18 @@ impl CredentialStatusStore {
         guard.remove(&normalize_status_key(key));
         persist_locked(&self.path, &guard)
     }
+
+    pub fn replace_all(&self, records: BTreeMap<String, CredentialStatusRecord>) -> Result<()> {
+        let mut guard = self
+            .records
+            .lock()
+            .map_err(|_| anyhow::anyhow!("status store lock poisoned"))?;
+        *guard = records
+            .into_iter()
+            .map(|(key, value)| (normalize_status_key(&key), value))
+            .collect();
+        persist_locked(&self.path, &guard)
+    }
 }
 
 pub fn normalize_status_key(key: &str) -> String {

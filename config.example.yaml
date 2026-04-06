@@ -48,6 +48,25 @@ refresh:
 network:
   timeout: "30s"
 
+backup:
+  enabled: false
+  remote:
+    type: "s3_compatible"
+    endpoint: ""
+    region: "us-east-1"
+    bucket: ""
+    object_prefix: "token-refresh"
+    access_key_id: ""
+    secret_access_key: ""
+    path_style: true
+  schedule:
+    daily_utc_enabled: true
+    after_refresh_enabled: true
+    after_refresh_debounce: "5m"
+    min_interval_between_auto_backups: "1h"
+  retention:
+    max_snapshots: 1
+
 web:
   enabled: true
   listen: "0.0.0.0:9876"

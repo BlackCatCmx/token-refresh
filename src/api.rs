@@ -13,6 +13,7 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
 use crate::archive;
+use crate::backup::RestoreResult;
 use crate::config::{EditableSettings, parse_byte_size_str};
 use crate::credential::CodexCredentialFile;
 use crate::credential_store::{CredentialStore, CredentialZone};
@@ -58,6 +59,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/credentials/archive.zip",
             get(download_credential_archive),
         )
+        .route("/api/backup/status", get(get_backup_status))
+        .route("/api/backup/snapshots", get(list_backup_snapshots))
+        .route("/api/backup/run", post(run_backup_now))
+        .route("/api/backup/restore", post(restore_from_backup))
         .route("/api/scheduler/start", post(start_scheduler))
         .route("/api/scheduler/stop", post(stop_scheduler))
         .route(
@@ -256,6 +261,13 @@ fn build_credential_views(state: &AppState, zone: CredentialZone) -> Result<Vec<
     Ok(items)
 }
 
+async fn acquire_write_guard(state: &AppState) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+    state.write_coordinator.ensure_writes_allowed()?;
+    let guard = state.write_coordinator.lock_commit().await;
+    state.write_coordinator.ensure_writes_allowed()?;
+    Ok(guard)
+}
+
 async fn import_json_credentials(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
@@ -265,15 +277,21 @@ async fn import_json_credentials(
         .effective_config()
         .await
         .request_identity;
-    match collect_json_files(&mut multipart)
-        .await
-        .and_then(|files| import_json_files(&state.store, files, &user_agent_list))
-    {
+    let files = match collect_json_files(&mut multipart).await {
+        Ok(files) => files,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    };
+    let _commit_guard = match acquire_write_guard(&state).await {
+        Ok(guard) => guard,
+        Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
+    };
+    match import_json_files(&state.store, files, &user_agent_list) {
         Ok(imported) => {
             let _ = state.logger.runtime(
                 "info",
                 format!("imported {} JSON credential file(s)", imported.len()),
             );
+            state.backup.mark_dirty();
             state.scheduler.wake();
             Json(serde_json::json!({ "imported": imported })).into_response()
         }
@@ -322,18 +340,24 @@ async fn import_zip_credentials(
         Ok(None) => return json_error(StatusCode::BAD_REQUEST, "未上传 ZIP 文件"),
         Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     };
-    match field.bytes().await.context("failed to read uploaded ZIP") {
-        Ok(bytes) => match import_zip(&state.store, &bytes, &user_agent_list) {
-            Ok(imported) => {
-                let _ = state.logger.runtime(
-                    "info",
-                    format!("imported {} credential file(s) from ZIP", imported.len()),
-                );
-                state.scheduler.wake();
-                Json(serde_json::json!({ "imported": imported })).into_response()
-            }
-            Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
-        },
+    let bytes = match field.bytes().await.context("failed to read uploaded ZIP") {
+        Ok(bytes) => bytes,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    };
+    let _commit_guard = match acquire_write_guard(&state).await {
+        Ok(guard) => guard,
+        Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
+    };
+    match import_zip(&state.store, &bytes, &user_agent_list) {
+        Ok(imported) => {
+            let _ = state.logger.runtime(
+                "info",
+                format!("imported {} credential file(s) from ZIP", imported.len()),
+            );
+            state.backup.mark_dirty();
+            state.scheduler.wake();
+            Json(serde_json::json!({ "imported": imported })).into_response()
+        }
         Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     }
 }
@@ -363,6 +387,10 @@ async fn patch_credential_user_agents(state: Arc<AppState>, mode: UserAgentPatch
         .effective_config()
         .await
         .request_identity;
+    let _commit_guard = match acquire_write_guard(&state).await {
+        Ok(guard) => guard,
+        Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
+    };
     match patch_user_agents(&state.store, &user_agent_list, mode) {
         Ok(UserAgentPatchSummary {
             updated,
@@ -383,6 +411,9 @@ async fn patch_credential_user_agents(state: Arc<AppState>, mode: UserAgentPatch
                     action, updated, unchanged, skipped_invalid
                 ),
             );
+            if updated > 0 {
+                state.backup.mark_dirty();
+            }
             state.scheduler.wake();
             Json(UserAgentPatchResponse {
                 updated,
@@ -404,6 +435,9 @@ async fn refresh_credential(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<NameRequest>,
 ) -> Response {
+    if let Err(err) = state.write_coordinator.ensure_writes_allowed() {
+        return json_error(StatusCode::CONFLICT, &err.to_string());
+    }
     let config = state.config_manager.effective_config().await;
     match state
         .transaction
@@ -416,6 +450,7 @@ async fn refresh_credential(
         .await
     {
         Ok(outcome) if outcome.success => {
+            state.backup.mark_dirty();
             state.scheduler.wake();
             Json(SimpleMessage {
                 message: outcome.message,
@@ -447,6 +482,10 @@ async fn restore_credentials(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<NamesRequest>,
 ) -> Response {
+    let _commit_guard = match acquire_write_guard(&state).await {
+        Ok(guard) => guard,
+        Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
+    };
     match move_credentials(
         &state.store,
         &state.status_store,
@@ -462,6 +501,7 @@ async fn restore_credentials(
                     count
                 ),
             );
+            state.backup.mark_dirty();
             state.scheduler.wake();
             Json(serde_json::json!({ "restored": count })).into_response()
         }
@@ -476,6 +516,10 @@ async fn delete_credentials(
     let zone = match CredentialZone::parse(payload.zone.trim()) {
         Ok(zone) => zone,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    };
+    let _commit_guard = match acquire_write_guard(&state).await {
+        Ok(guard) => guard,
+        Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
     for name in &payload.names {
         if let Err(err) = state.store.delete(zone, name.trim()) {
@@ -493,6 +537,9 @@ async fn delete_credentials(
             zone.as_str()
         ),
     );
+    if !payload.names.is_empty() {
+        state.backup.mark_dirty();
+    }
     state.scheduler.wake();
     Json(serde_json::json!({ "deleted": payload.names.len() })).into_response()
 }
@@ -573,6 +620,10 @@ async fn update_credential_content(
     if let Err(err) = validate_credential_content(&payload.content) {
         return json_error(StatusCode::BAD_REQUEST, &err.to_string());
     }
+    let _commit_guard = match acquire_write_guard(&state).await {
+        Ok(guard) => guard,
+        Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
+    };
     match state
         .store
         .write_bytes(zone, payload.name.trim(), payload.content.as_bytes())
@@ -586,6 +637,7 @@ async fn update_credential_content(
                     zone.as_str()
                 ),
             );
+            state.backup.mark_dirty();
             state.scheduler.wake();
             Json(SimpleMessage {
                 message: "凭证已保存".to_string(),
@@ -656,6 +708,9 @@ async fn stop_scheduler(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn trigger_manual_refresh_all(State(state): State<Arc<AppState>>) -> Response {
+    if let Err(err) = state.write_coordinator.ensure_writes_allowed() {
+        return json_error(StatusCode::CONFLICT, &err.to_string());
+    }
     match state.scheduler.trigger_manual_refresh_all().await {
         Ok(()) => {
             let _ = state
@@ -683,6 +738,59 @@ async fn scheduler_status(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+async fn get_backup_status(State(state): State<Arc<AppState>>) -> Response {
+    Json(state.backup.status().await).into_response()
+}
+
+async fn list_backup_snapshots(State(state): State<Arc<AppState>>) -> Response {
+    match state.backup.list_snapshots().await {
+        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Err(err) => json_error(backup_error_status(&err), &err.to_string()),
+    }
+}
+
+async fn run_backup_now(State(state): State<Arc<AppState>>) -> Response {
+    match state.backup.run_manual_backup().await {
+        Ok(snapshot) => Json(serde_json::json!({ "snapshot": snapshot })).into_response(),
+        Err(err) => json_error(backup_error_status(&err), &err.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RestoreBackupRequest {
+    snapshot_key: String,
+    confirmation: String,
+}
+
+async fn restore_from_backup(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RestoreBackupRequest>,
+) -> Response {
+    if payload.confirmation.trim() != "确定还原" {
+        return json_error(StatusCode::BAD_REQUEST, "请输入“确定还原”后再继续");
+    }
+    match state
+        .backup
+        .restore_snapshot(payload.snapshot_key.trim())
+        .await
+    {
+        Ok(RestoreResult {
+            snapshot_key,
+            normal_count,
+            abnormal_count,
+        }) => {
+            state.scheduler.wake();
+            Json(serde_json::json!({
+                "snapshot_key": snapshot_key,
+                "normal_count": normal_count,
+                "abnormal_count": abnormal_count
+            }))
+            .into_response()
+        }
+        Err(err) => json_error(backup_error_status(&err), &err.to_string()),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct SchedulerStatusResponse {
     #[serde(flatten)]
@@ -703,7 +811,8 @@ struct LogsResponse {
 }
 
 fn clamp_log_line_limit(limit: Option<usize>) -> usize {
-    limit.map(|value| value.min(LOG_LINE_LIMIT))
+    limit
+        .map(|value| value.min(LOG_LINE_LIMIT))
         .unwrap_or(LOG_LINE_LIMIT)
 }
 
@@ -712,7 +821,10 @@ async fn get_logs(State(state): State<Arc<AppState>>, Query(query): Query<LogsQu
         Ok(kind) => kind,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     };
-    match state.logger.read_tail(kind, clamp_log_line_limit(query.limit)) {
+    match state
+        .logger
+        .read_tail(kind, clamp_log_line_limit(query.limit))
+    {
         Ok(content) => Json(LogsResponse {
             kind: query.kind,
             content,
@@ -847,14 +959,16 @@ async fn update_settings(
                 let _ = state.logger.runtime(
                     "info",
                     format!(
-                        "settings updated (log_level={}, max_file_size={}, proxy_mode={}, abnormal_threshold={}, timeout={})",
+                        "settings updated (log_level={}, max_file_size={}, proxy_mode={}, abnormal_threshold={}, timeout={}, backup_enabled={})",
                         config.log_level.trim(),
                         config.logging.max_file_size.trim(),
                         config.proxy.mode.trim(),
                         config.credential_management.abnormal_threshold,
-                        config.network.timeout.trim()
+                        config.network.timeout.trim(),
+                        config.backup.enabled
                     ),
                 );
+                state.backup.wake();
                 state.scheduler.wake();
                 Json(SimpleMessage {
                     message: "设置已保存".to_string(),
@@ -880,6 +994,20 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+fn backup_error_status(error: &anyhow::Error) -> StatusCode {
+    let message = error.to_string();
+    if message.contains("未启用")
+        || message.contains("配置不完整")
+        || message.contains("正在执行")
+        || message.contains("从备份还原")
+        || message.contains("请等待其完成")
+    {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
 }
 
 fn file_name_from_key(key: &str) -> String {

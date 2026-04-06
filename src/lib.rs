@@ -1,5 +1,7 @@
 pub mod api;
 pub mod archive;
+pub mod backup;
+pub mod backup_archive;
 pub mod cli;
 pub mod config;
 pub mod credential;
@@ -13,8 +15,10 @@ pub mod originator;
 pub mod proxy;
 pub mod recovery;
 pub mod refresh_client;
+pub mod s3_compatible;
 pub mod scheduler;
 pub mod status;
 pub mod transaction;
 pub mod user_agent;
 pub mod web;
+pub mod write_coordinator;

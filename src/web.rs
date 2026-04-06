@@ -8,6 +8,7 @@ use sha2::Sha256;
 use tokio::net::TcpListener;
 
 use crate::api;
+use crate::backup::BackupCoordinator;
 use crate::config::{ConfigManager, ConfigPaths, parse_byte_size_str};
 use crate::credential_store::CredentialStore;
 use crate::lockfile::ServiceLock;
@@ -16,6 +17,7 @@ use crate::recovery;
 use crate::scheduler::SchedulerHandle;
 use crate::status::CredentialStatusStore;
 use crate::transaction::RefreshTransaction;
+use crate::write_coordinator::WriteCoordinator;
 
 type HmacSha256 = Hmac<Sha256>;
 const SESSION_COOKIE_LIFETIME_DAYS: i64 = 3650;
@@ -28,6 +30,8 @@ pub struct AppState {
     pub logger: Arc<LogManager>,
     pub scheduler: SchedulerHandle,
     pub transaction: Arc<RefreshTransaction>,
+    pub backup: Arc<BackupCoordinator>,
+    pub write_coordinator: Arc<WriteCoordinator>,
     pub session_manager: SessionManager,
     pub _service_lock: Arc<ServiceLock>,
 }
@@ -125,13 +129,24 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
     let status_store = Arc::new(CredentialStatusStore::load(
         config.state_dir.join("credential_status.json"),
     )?);
+    let write_coordinator = Arc::new(WriteCoordinator::new());
     let transaction = Arc::new(RefreshTransaction::new(
         store.clone(),
         status_store.clone(),
         logger.clone(),
+        write_coordinator.clone(),
     ));
     let scheduler = SchedulerHandle::new();
+    let backup = Arc::new(BackupCoordinator::new(
+        config_manager.clone(),
+        store.clone(),
+        status_store.clone(),
+        scheduler.clone(),
+        logger.clone(),
+        write_coordinator.clone(),
+    ));
     let session_manager = SessionManager::new(&config_manager.web_password().await)?;
+    backup.spawn_background();
 
     if !config.web.enabled {
         let _ = logger.runtime("info", "web interface disabled; scheduler-only mode active");
@@ -140,6 +155,7 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
             store,
             status_store,
             transaction,
+            Some(backup),
             logger,
         );
         tokio::signal::ctrl_c().await?;
@@ -161,10 +177,19 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         logger: logger.clone(),
         scheduler: scheduler.clone(),
         transaction: transaction.clone(),
+        backup: backup.clone(),
+        write_coordinator,
         session_manager,
         _service_lock: service_lock,
     });
-    scheduler.spawn_background(config_manager, store, status_store, transaction, logger);
+    scheduler.spawn_background(
+        config_manager,
+        store,
+        status_store,
+        transaction,
+        Some(backup),
+        logger,
+    );
 
     let app = api::router(state);
     axum::serve(listener, app)

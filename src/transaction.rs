@@ -11,6 +11,7 @@ use crate::logging::LogManager;
 use crate::recovery;
 use crate::refresh_client::{RefreshClient, RefreshFailure, RefreshResponsePayload};
 use crate::status::CredentialStatusStore;
+use crate::write_coordinator::WriteCoordinator;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RefreshTrigger {
@@ -34,6 +35,7 @@ pub struct RefreshTransaction {
     store: Arc<CredentialStore>,
     status_store: Arc<CredentialStatusStore>,
     logger: Arc<LogManager>,
+    write_coordinator: Arc<WriteCoordinator>,
     client: RefreshClient,
 }
 
@@ -51,11 +53,13 @@ impl RefreshTransaction {
         store: Arc<CredentialStore>,
         status_store: Arc<CredentialStatusStore>,
         logger: Arc<LogManager>,
+        write_coordinator: Arc<WriteCoordinator>,
     ) -> Self {
         Self {
             store,
             status_store,
             logger,
+            write_coordinator,
             client: RefreshClient::new(),
         }
     }
@@ -67,6 +71,7 @@ impl RefreshTransaction {
         key: &str,
         trigger: RefreshTrigger,
     ) -> Result<RefreshOutcome> {
+        let generation = self.write_coordinator.generation();
         let entry = self.store.read_entry(zone, key)?;
         if let Some(parse_error) = entry.parse_error {
             return self
@@ -75,6 +80,7 @@ impl RefreshTransaction {
                     zone,
                     key,
                     trigger,
+                    generation,
                     RefreshFailure::deterministic("invalid_json", parse_error),
                 )
                 .await;
@@ -89,6 +95,7 @@ impl RefreshTransaction {
                     zone,
                     key,
                     trigger,
+                    generation,
                     RefreshFailure::transient(
                         "unsupported_provider",
                         "credential type is not codex",
@@ -103,6 +110,7 @@ impl RefreshTransaction {
                     zone,
                     key,
                     trigger,
+                    generation,
                     RefreshFailure::deterministic(
                         "missing_refresh_token",
                         "credential is missing refresh_token",
@@ -136,6 +144,7 @@ impl RefreshTransaction {
                             zone,
                             key,
                             trigger,
+                            generation,
                             RefreshFailure::deterministic("invalid_user_agent", err.to_string()),
                         )
                         .await;
@@ -148,10 +157,21 @@ impl RefreshTransaction {
             .await
         {
             Ok(payload) => {
-                self.handle_success(config, zone, key, trigger, &mut credential, payload)
+                self.handle_success(
+                    config,
+                    zone,
+                    key,
+                    trigger,
+                    generation,
+                    &mut credential,
+                    payload,
+                )
+                .await
+            }
+            Err(error) => {
+                self.handle_failure(config, zone, key, trigger, generation, error)
                     .await
             }
-            Err(error) => self.handle_failure(config, zone, key, trigger, error).await,
         }
     }
 
@@ -161,6 +181,7 @@ impl RefreshTransaction {
         zone: CredentialZone,
         key: &str,
         trigger: RefreshTrigger,
+        generation: u64,
         credential: &mut CodexCredentialFile,
         payload: RefreshResponsePayload,
     ) -> Result<RefreshOutcome> {
@@ -168,19 +189,24 @@ impl RefreshTransaction {
         merge_refresh_response(credential, payload)?;
         credential.provider_type = "codex".to_string();
         credential.set_last_refresh_now();
-        let target_path = self.store.key_to_path(zone, key)?;
-        recovery::write_recovery(&target_path, credential)?;
-        self.store.write_credential(zone, key, credential)?;
-        if let Err(err) = recovery::delete_recovery(&target_path) {
-            let _ = self.logger.runtime(
-                "warn",
-                format!(
-                    "credential {} refreshed but recovery cleanup failed: {err:#}",
-                    key
-                ),
-            );
+        {
+            let _commit_guard = self.write_coordinator.lock_commit().await;
+            self.write_coordinator
+                .ensure_generation_current(generation)?;
+            let target_path = self.store.key_to_path(zone, key)?;
+            recovery::write_recovery(&target_path, credential)?;
+            self.store.write_credential(zone, key, credential)?;
+            if let Err(err) = recovery::delete_recovery(&target_path) {
+                let _ = self.logger.runtime(
+                    "warn",
+                    format!(
+                        "credential {} refreshed but recovery cleanup failed: {err:#}",
+                        key
+                    ),
+                );
+            }
+            self.status_store.record_success(key, zone.as_str())?;
         }
-        self.status_store.record_success(key, zone.as_str())?;
         self.logger.audit(format!(
             "refresh_success trigger={} zone={} key={}",
             trigger.as_str(),
@@ -213,52 +239,59 @@ impl RefreshTransaction {
         zone: CredentialZone,
         key: &str,
         trigger: RefreshTrigger,
+        generation: u64,
         error: RefreshFailure,
     ) -> Result<RefreshOutcome> {
-        let current_failures = self
-            .status_store
-            .get(key)?
-            .map(|record| record.consecutive_failure_count)
-            .unwrap_or(0);
-        let failure_count = if error.count_towards_abnormal {
-            current_failures.saturating_add(1)
-        } else {
-            current_failures
-        };
-        let should_move = zone == CredentialZone::Normal
-            && error.count_towards_abnormal
-            && failure_count >= config.credential_management.abnormal_threshold;
-        let moved = if should_move {
-            match self.store.move_between_zones(
-                CredentialZone::Normal,
-                CredentialZone::Abnormal,
-                key,
-            ) {
-                Ok(()) => true,
-                Err(move_error) => {
-                    self.logger.runtime(
-                        "error",
-                        format!("failed to move {} to abnormal zone: {move_error:#}", key),
-                    )?;
-                    false
+        let (failure_count, moved, final_zone) = {
+            let _commit_guard = self.write_coordinator.lock_commit().await;
+            self.write_coordinator
+                .ensure_generation_current(generation)?;
+            let current_failures = self
+                .status_store
+                .get(key)?
+                .map(|record| record.consecutive_failure_count)
+                .unwrap_or(0);
+            let failure_count = if error.count_towards_abnormal {
+                current_failures.saturating_add(1)
+            } else {
+                current_failures
+            };
+            let should_move = zone == CredentialZone::Normal
+                && error.count_towards_abnormal
+                && failure_count >= config.credential_management.abnormal_threshold;
+            let moved = if should_move {
+                match self.store.move_between_zones(
+                    CredentialZone::Normal,
+                    CredentialZone::Abnormal,
+                    key,
+                ) {
+                    Ok(()) => true,
+                    Err(move_error) => {
+                        self.logger.runtime(
+                            "error",
+                            format!("failed to move {} to abnormal zone: {move_error:#}", key),
+                        )?;
+                        false
+                    }
                 }
-            }
-        } else {
-            false
+            } else {
+                false
+            };
+            let final_zone = if moved {
+                CredentialZone::Abnormal
+            } else {
+                zone
+            };
+            self.status_store.record_failure(
+                key,
+                zone.as_str(),
+                error.count_towards_abnormal,
+                moved,
+                error.code.clone(),
+                error.reason.clone(),
+            )?;
+            (failure_count, moved, final_zone)
         };
-        let final_zone = if moved {
-            CredentialZone::Abnormal
-        } else {
-            zone
-        };
-        self.status_store.record_failure(
-            key,
-            zone.as_str(),
-            error.count_towards_abnormal,
-            moved,
-            error.code.clone(),
-            error.reason.clone(),
-        )?;
         self.logger.audit(format!(
             "refresh_failed trigger={} zone={} key={} code={} moved_to_abnormal={}",
             trigger.as_str(),

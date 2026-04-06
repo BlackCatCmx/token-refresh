@@ -48,6 +48,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
+    pub backup: BackupConfig,
+    #[serde(default)]
     pub web: WebConfig,
 }
 
@@ -64,6 +66,7 @@ impl Default for AppConfig {
             credential_management: CredentialManagementConfig::default(),
             refresh: RefreshConfig::default(),
             network: NetworkConfig::default(),
+            backup: BackupConfig::default(),
             web: WebConfig::default(),
         }
     }
@@ -190,6 +193,101 @@ impl Default for NetworkConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupConfig {
+    #[serde(default = "default_backup_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub remote: BackupRemoteConfig,
+    #[serde(default)]
+    pub schedule: BackupScheduleConfig,
+    #[serde(default)]
+    pub retention: BackupRetentionConfig,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_backup_enabled(),
+            remote: BackupRemoteConfig::default(),
+            schedule: BackupScheduleConfig::default(),
+            retention: BackupRetentionConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupRemoteConfig {
+    #[serde(rename = "type", default = "default_backup_remote_type")]
+    pub kind: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default = "default_backup_region")]
+    pub region: String,
+    #[serde(default)]
+    pub bucket: String,
+    #[serde(default = "default_backup_object_prefix")]
+    pub object_prefix: String,
+    #[serde(default)]
+    pub access_key_id: String,
+    #[serde(default)]
+    pub secret_access_key: String,
+    #[serde(default = "default_backup_path_style")]
+    pub path_style: bool,
+}
+
+impl Default for BackupRemoteConfig {
+    fn default() -> Self {
+        Self {
+            kind: default_backup_remote_type(),
+            endpoint: String::new(),
+            region: default_backup_region(),
+            bucket: String::new(),
+            object_prefix: default_backup_object_prefix(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            path_style: default_backup_path_style(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupScheduleConfig {
+    #[serde(default = "default_backup_daily_utc_enabled")]
+    pub daily_utc_enabled: bool,
+    #[serde(default = "default_backup_after_refresh_enabled")]
+    pub after_refresh_enabled: bool,
+    #[serde(default = "default_backup_after_refresh_debounce")]
+    pub after_refresh_debounce: String,
+    #[serde(default = "default_backup_min_interval_between_auto_backups")]
+    pub min_interval_between_auto_backups: String,
+}
+
+impl Default for BackupScheduleConfig {
+    fn default() -> Self {
+        Self {
+            daily_utc_enabled: default_backup_daily_utc_enabled(),
+            after_refresh_enabled: default_backup_after_refresh_enabled(),
+            after_refresh_debounce: default_backup_after_refresh_debounce(),
+            min_interval_between_auto_backups: default_backup_min_interval_between_auto_backups(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupRetentionConfig {
+    #[serde(default = "default_backup_max_snapshots")]
+    pub max_snapshots: usize,
+}
+
+impl Default for BackupRetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_snapshots: default_backup_max_snapshots(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebConfig {
     #[serde(default = "default_web_enabled")]
     pub enabled: bool,
@@ -215,6 +313,7 @@ pub struct EditableSettings {
     pub credential_management: CredentialManagementConfig,
     pub refresh: EditableRefreshConfig,
     pub network: NetworkConfig,
+    pub backup: BackupConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -252,6 +351,7 @@ impl From<&AppConfig> for EditableSettings {
                 failure_backoff: value.refresh.failure_backoff.clone(),
             },
             network: value.network.clone(),
+            backup: value.backup.clone(),
         }
     }
 }
@@ -418,6 +518,7 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
     parse_duration_str(&config.refresh.failure_backoff)?;
     parse_duration_str(&config.network.timeout)?;
     parse_byte_size_str(&config.logging.max_file_size)?;
+    validate_backup_config(&config.backup)?;
     validate_proxy_mode(config.proxy.mode.trim())?;
     crate::proxy::validate_proxy_list(&config.proxy.list)?;
     SocketAddr::from_str(config.web.listen.trim())
@@ -577,6 +678,54 @@ fn diff_editable_settings(current: &EditableSettings, incoming: &EditableSetting
     if current.network.timeout != incoming.network.timeout {
         changed.push("network.timeout".to_string());
     }
+    if current.backup.enabled != incoming.backup.enabled {
+        changed.push("backup.enabled".to_string());
+    }
+    if current.backup.remote.kind != incoming.backup.remote.kind {
+        changed.push("backup.remote.type".to_string());
+    }
+    if current.backup.remote.endpoint != incoming.backup.remote.endpoint {
+        changed.push("backup.remote.endpoint".to_string());
+    }
+    if current.backup.remote.region != incoming.backup.remote.region {
+        changed.push("backup.remote.region".to_string());
+    }
+    if current.backup.remote.bucket != incoming.backup.remote.bucket {
+        changed.push("backup.remote.bucket".to_string());
+    }
+    if current.backup.remote.object_prefix != incoming.backup.remote.object_prefix {
+        changed.push("backup.remote.object_prefix".to_string());
+    }
+    if current.backup.remote.access_key_id != incoming.backup.remote.access_key_id {
+        changed.push("backup.remote.access_key_id".to_string());
+    }
+    if current.backup.remote.secret_access_key != incoming.backup.remote.secret_access_key {
+        changed.push("backup.remote.secret_access_key".to_string());
+    }
+    if current.backup.remote.path_style != incoming.backup.remote.path_style {
+        changed.push("backup.remote.path_style".to_string());
+    }
+    if current.backup.schedule.daily_utc_enabled != incoming.backup.schedule.daily_utc_enabled {
+        changed.push("backup.schedule.daily_utc_enabled".to_string());
+    }
+    if current.backup.schedule.after_refresh_enabled
+        != incoming.backup.schedule.after_refresh_enabled
+    {
+        changed.push("backup.schedule.after_refresh_enabled".to_string());
+    }
+    if current.backup.schedule.after_refresh_debounce
+        != incoming.backup.schedule.after_refresh_debounce
+    {
+        changed.push("backup.schedule.after_refresh_debounce".to_string());
+    }
+    if current.backup.schedule.min_interval_between_auto_backups
+        != incoming.backup.schedule.min_interval_between_auto_backups
+    {
+        changed.push("backup.schedule.min_interval_between_auto_backups".to_string());
+    }
+    if current.backup.retention.max_snapshots != incoming.backup.retention.max_snapshots {
+        changed.push("backup.retention.max_snapshots".to_string());
+    }
     changed
 }
 
@@ -594,6 +743,7 @@ fn apply_editable_settings(config: &mut AppConfig, settings: EditableSettings) {
     config.refresh.manual_inter_refresh_delay_max = settings.refresh.manual_inter_refresh_delay_max;
     config.refresh.failure_backoff = settings.refresh.failure_backoff;
     config.network = settings.network;
+    config.backup = settings.backup;
 }
 
 fn validate_proxy_mode(value: &str) -> Result<()> {
@@ -684,6 +834,82 @@ fn default_timeout() -> String {
     "30s".to_string()
 }
 
+fn validate_backup_config(config: &BackupConfig) -> Result<()> {
+    let kind = config.remote.kind.trim();
+    if kind != "s3_compatible" {
+        bail!("backup.remote.type must be s3_compatible");
+    }
+    parse_duration_str(&config.schedule.after_refresh_debounce)?;
+    parse_duration_str(&config.schedule.min_interval_between_auto_backups)?;
+    if config.retention.max_snapshots != 1 {
+        bail!("backup.retention.max_snapshots must be 1");
+    }
+    if !config.enabled {
+        return Ok(());
+    }
+    if config.remote.endpoint.trim().is_empty() {
+        bail!("backup.remote.endpoint is required when backup.enabled=true");
+    }
+    let endpoint = reqwest::Url::parse(config.remote.endpoint.trim())
+        .with_context(|| format!("invalid backup.remote.endpoint: {}", config.remote.endpoint))?;
+    if !matches!(endpoint.scheme(), "http" | "https") {
+        bail!("backup.remote.endpoint must use http or https");
+    }
+    if config.remote.region.trim().is_empty() {
+        bail!("backup.remote.region is required when backup.enabled=true");
+    }
+    if config.remote.bucket.trim().is_empty() {
+        bail!("backup.remote.bucket is required when backup.enabled=true");
+    }
+    if config.remote.access_key_id.trim().is_empty() {
+        bail!("backup.remote.access_key_id is required when backup.enabled=true");
+    }
+    if config.remote.secret_access_key.trim().is_empty() {
+        bail!("backup.remote.secret_access_key is required when backup.enabled=true");
+    }
+    Ok(())
+}
+
+fn default_backup_enabled() -> bool {
+    false
+}
+
+fn default_backup_remote_type() -> String {
+    "s3_compatible".to_string()
+}
+
+fn default_backup_region() -> String {
+    "us-east-1".to_string()
+}
+
+fn default_backup_object_prefix() -> String {
+    "token-refresh".to_string()
+}
+
+fn default_backup_path_style() -> bool {
+    true
+}
+
+fn default_backup_daily_utc_enabled() -> bool {
+    true
+}
+
+fn default_backup_after_refresh_enabled() -> bool {
+    true
+}
+
+fn default_backup_after_refresh_debounce() -> String {
+    "5m".to_string()
+}
+
+fn default_backup_min_interval_between_auto_backups() -> String {
+    "1h".to_string()
+}
+
+fn default_backup_max_snapshots() -> usize {
+    1
+}
+
 fn default_web_enabled() -> bool {
     true
 }
@@ -760,6 +986,13 @@ mod tests {
         let mut config = AppConfig::default();
         config.refresh.manual_inter_refresh_delay_min = "2m".to_string();
         config.refresh.manual_inter_refresh_delay_max = "30s".to_string();
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_config_rejects_backup_retention_other_than_one() {
+        let mut config = AppConfig::default();
+        config.backup.retention.max_snapshots = 2;
         assert!(validate_config(&config).is_err());
     }
 }

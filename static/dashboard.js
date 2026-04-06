@@ -1,5 +1,6 @@
 let schedulerPollTimer = null;
 let schedulerManualActive = false;
+let backupStatusCache = null;
 // Keep this aligned with the backend clamp in src/api.rs.
 const LOG_LINE_LIMIT = 50;
 // Deterministic abnormal credential codes mirrored from backend refresh classification.
@@ -32,6 +33,7 @@ async function api(url, options = {}) {
 async function refreshAll() {
   await Promise.all([
     loadScheduler(),
+    loadBackupStatus(),
     loadSettings(),
     loadCredentials("normal"),
     loadCredentials("abnormal"),
@@ -99,6 +101,23 @@ async function loadScheduler() {
   schedulerManualActive = manualBusy;
 }
 
+async function loadBackupStatus() {
+  const data = await api("api/backup/status");
+  backupStatusCache = data;
+  const lines = [];
+  lines.push(`备份功能: ${data.enabled ? "已开启" : "已关闭"}`);
+  lines.push(`远端配置: ${data.configured ? "已就绪" : "未完成"}`);
+  lines.push(`当前状态: ${data.restore_running ? "恢复中" : data.running ? "备份中" : "空闲"}`);
+  lines.push(`最近成功: ${data.last_success_at ? shortTime(data.last_success_at) : "无"}`);
+  lines.push(`下次日备份: ${data.next_daily_at ? shortTime(data.next_daily_at) : "未启用"}`);
+  lines.push(`待上传改动: ${data.dirty_pending ? "有" : "无"}`);
+  lines.push(`最近错误: ${data.last_error || "无"}`);
+  document.getElementById("backup-meta").textContent = lines.join(" | ");
+  const canOperate = Boolean(data.enabled && data.configured && !data.running && !data.restore_running);
+  document.getElementById("backup-run-btn").disabled = !canOperate;
+  document.getElementById("backup-restore-open-btn").disabled = !canOperate;
+}
+
 function shortTime(rfc3339) {
   const d = new Date(rfc3339);
   if (isNaN(d.getTime())) return rfc3339;
@@ -131,10 +150,23 @@ async function loadSettings() {
   document.getElementById("manual-delay-max").value = data.settings.refresh.manual_inter_refresh_delay_max;
   document.getElementById("failure-backoff").value = data.settings.refresh.failure_backoff;
   document.getElementById("network-timeout").value = data.settings.network.timeout;
+  document.getElementById("backup-enabled").value = String(data.settings.backup.enabled);
+  document.getElementById("backup-remote-type").value = data.settings.backup.remote.type;
+  document.getElementById("backup-endpoint").value = data.settings.backup.remote.endpoint;
+  document.getElementById("backup-region").value = data.settings.backup.remote.region;
+  document.getElementById("backup-bucket").value = data.settings.backup.remote.bucket;
+  document.getElementById("backup-prefix").value = data.settings.backup.remote.object_prefix;
+  document.getElementById("backup-access-key-id").value = data.settings.backup.remote.access_key_id;
+  document.getElementById("backup-secret-access-key").value = data.settings.backup.remote.secret_access_key;
+  document.getElementById("backup-path-style").value = String(data.settings.backup.remote.path_style);
+  document.getElementById("backup-daily-enabled").value = String(data.settings.backup.schedule.daily_utc_enabled);
+  document.getElementById("backup-after-refresh-enabled").value = String(data.settings.backup.schedule.after_refresh_enabled);
+  document.getElementById("backup-after-refresh-debounce").value = data.settings.backup.schedule.after_refresh_debounce;
+  document.getElementById("backup-min-auto-interval").value = data.settings.backup.schedule.min_interval_between_auto_backups;
   syncUserAgentMode();
   renderHeaderPreview(data.header_preview);
   document.getElementById("settings-meta").textContent = `配置文件: ${data.config_path} | 环境变量锁定项: ${data.locked_fields.join(", ") || "无"}`;
-  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout"]) {
+  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout", "backup-enabled", "backup-remote-type", "backup-endpoint", "backup-region", "backup-bucket", "backup-prefix", "backup-access-key-id", "backup-secret-access-key", "backup-path-style", "backup-daily-enabled", "backup-after-refresh-enabled", "backup-after-refresh-debounce", "backup-min-auto-interval"]) {
     document.getElementById(field).disabled = false;
   }
   const lockMap = {
@@ -158,6 +190,19 @@ async function loadSettings() {
     "refresh.manual_inter_refresh_delay_max": ["manual-delay-max"],
     "refresh.failure_backoff": ["failure-backoff"],
     "network.timeout": ["network-timeout"],
+    "backup.enabled": ["backup-enabled"],
+    "backup.remote.type": ["backup-remote-type"],
+    "backup.remote.endpoint": ["backup-endpoint"],
+    "backup.remote.region": ["backup-region"],
+    "backup.remote.bucket": ["backup-bucket"],
+    "backup.remote.object_prefix": ["backup-prefix"],
+    "backup.remote.access_key_id": ["backup-access-key-id"],
+    "backup.remote.secret_access_key": ["backup-secret-access-key"],
+    "backup.remote.path_style": ["backup-path-style"],
+    "backup.schedule.daily_utc_enabled": ["backup-daily-enabled"],
+    "backup.schedule.after_refresh_enabled": ["backup-after-refresh-enabled"],
+    "backup.schedule.after_refresh_debounce": ["backup-after-refresh-debounce"],
+    "backup.schedule.min_interval_between_auto_backups": ["backup-min-auto-interval"],
   };
   for (const key of data.locked_fields) {
     for (const fieldId of lockMap[key] || []) {
@@ -227,6 +272,28 @@ async function saveSettings() {
     network: {
       timeout: document.getElementById("network-timeout").value,
     },
+    backup: {
+      enabled: document.getElementById("backup-enabled").value === "true",
+      remote: {
+        type: document.getElementById("backup-remote-type").value,
+        endpoint: document.getElementById("backup-endpoint").value,
+        region: document.getElementById("backup-region").value,
+        bucket: document.getElementById("backup-bucket").value,
+        object_prefix: document.getElementById("backup-prefix").value,
+        access_key_id: document.getElementById("backup-access-key-id").value,
+        secret_access_key: document.getElementById("backup-secret-access-key").value,
+        path_style: document.getElementById("backup-path-style").value === "true",
+      },
+      schedule: {
+        daily_utc_enabled: document.getElementById("backup-daily-enabled").value === "true",
+        after_refresh_enabled: document.getElementById("backup-after-refresh-enabled").value === "true",
+        after_refresh_debounce: document.getElementById("backup-after-refresh-debounce").value,
+        min_interval_between_auto_backups: document.getElementById("backup-min-auto-interval").value,
+      },
+      retention: {
+        max_snapshots: 1,
+      },
+    },
   };
   await api("api/settings", {
     method: "PUT",
@@ -234,6 +301,7 @@ async function saveSettings() {
     body: JSON.stringify(payload),
   });
   await loadSettings();
+  await loadBackupStatus();
   await loadScheduler();
   alert("设置已保存");
 }
@@ -454,6 +522,94 @@ function downloadCredentialArchive(zone) {
   window.location.href = `api/credentials/archive.zip?zone=${zone}`;
 }
 
+const backupRestoreState = {
+  snapshots: [],
+  selectedKey: null,
+};
+
+async function runBackupNow() {
+  const data = await api("api/backup/run", { method: "POST" });
+  await loadBackupStatus();
+  showToast(`备份完成：${data.snapshot?.key || "远端快照已更新"}`);
+}
+
+async function openBackupRestoreModal() {
+  try {
+    const data = await api("api/backup/snapshots");
+    backupRestoreState.snapshots = data.items || [];
+    backupRestoreState.selectedKey = backupRestoreState.snapshots[0]?.key || null;
+    const list = document.getElementById("backup-restore-list");
+    if (backupRestoreState.snapshots.length === 0) {
+      list.innerHTML = `<div class="empty-hint">远端没有可用备份</div>`;
+    } else {
+      list.innerHTML = backupRestoreState.snapshots.map((item, index) => `
+        <div class="backup-snapshot-item">
+          <label>
+            <input type="radio" name="backup-snapshot" value="${escapeHtml(item.key)}" ${index === 0 ? "checked" : ""} onchange="selectBackupSnapshot(this.value)">
+            <span class="backup-snapshot-meta">
+              <span>${escapeHtml(item.key)}</span>
+              <span class="muted">时间：${escapeHtml(item.created_at ? shortTime(item.created_at) : item.last_modified ? shortTime(item.last_modified) : "未知")}</span>
+              <span class="muted">触发：${escapeHtml(item.trigger || "unknown")} | 大小：${escapeHtml(formatBytes(item.size || 0))}</span>
+            </span>
+          </label>
+        </div>
+      `).join("");
+    }
+    document.getElementById("backup-restore-confirmation").value = "";
+    syncBackupRestoreConfirm();
+    const modal = document.getElementById("backup-restore-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    document.body.classList.add("modal-open");
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function closeBackupRestoreModal() {
+  backupRestoreState.snapshots = [];
+  backupRestoreState.selectedKey = null;
+  document.getElementById("backup-restore-confirmation").value = "";
+  const modal = document.getElementById("backup-restore-modal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function selectBackupSnapshot(value) {
+  backupRestoreState.selectedKey = value;
+  syncBackupRestoreConfirm();
+}
+
+function syncBackupRestoreConfirm() {
+  const enabled = backupRestoreState.selectedKey
+    && document.getElementById("backup-restore-confirmation").value.trim() === "确定还原";
+  document.getElementById("backup-restore-submit").disabled = !enabled;
+}
+
+async function submitBackupRestore() {
+  if (!backupRestoreState.selectedKey) {
+    alert("请选择一个备份");
+    return;
+  }
+  const confirmation = document.getElementById("backup-restore-confirmation").value.trim();
+  if (confirmation !== "确定还原") {
+    alert("请输入“确定还原”后再继续");
+    return;
+  }
+  await api("api/backup/restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      snapshot_key: backupRestoreState.selectedKey,
+      confirmation,
+    }),
+  });
+  closeBackupRestoreModal();
+  await refreshAll();
+  showToast("备份还原完成");
+}
+
 async function importFiles() {
   const input = document.getElementById("upload-files");
   if (!input.files.length) return alert("请选择文件");
@@ -527,6 +683,13 @@ async function clearLog(kind) {
 async function logout() {
   await api("api/session/logout", { method: "POST" });
   location.reload();
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function escapeHtml(value) {
@@ -607,6 +770,12 @@ window.importFiles = importFiles;
 window.fillMissingUserAgents = fillMissingUserAgents;
 window.reassignCliVersions = reassignCliVersions;
 window.reassignAllUserAgents = reassignAllUserAgents;
+window.runBackupNow = runBackupNow;
+window.openBackupRestoreModal = openBackupRestoreModal;
+window.closeBackupRestoreModal = closeBackupRestoreModal;
+window.selectBackupSnapshot = selectBackupSnapshot;
+window.syncBackupRestoreConfirm = syncBackupRestoreConfirm;
+window.submitBackupRestore = submitBackupRestore;
 window.reloadLog = reloadLog;
 window.downloadLog = downloadLog;
 window.clearLog = clearLog;
@@ -622,5 +791,9 @@ document.addEventListener("DOMContentLoaded", () => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !document.getElementById("credential-editor-modal").classList.contains("hidden")) {
     closeCredentialEditor();
+    return;
+  }
+  if (event.key === "Escape" && !document.getElementById("backup-restore-modal").classList.contains("hidden")) {
+    closeBackupRestoreModal();
   }
 });

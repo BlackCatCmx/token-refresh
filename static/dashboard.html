@@ -79,10 +79,13 @@
           <button type="button" onclick="document.getElementById('upload-files').click()">上传凭证</button>
           <button type="button" class="secondary" onclick="downloadCredentialArchive('normal')">下载正常区 ZIP</button>
           <button type="button" class="secondary" onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
+          <button type="button" id="backup-run-btn" onclick="runBackupNow()">立即备份</button>
+          <button type="button" class="warn" id="backup-restore-open-btn" onclick="openBackupRestoreModal()">从备份还原</button>
           <button type="button" class="secondary" onclick="fillMissingUserAgents()">补充缺失 UA</button>
           <button type="button" class="secondary" onclick="reassignCliVersions()">重配UA-cx版本</button>
           <button type="button" class="warn" onclick="reassignAllUserAgents()">重配UA-全量</button>
         </div>
+        <div id="backup-meta" class="muted"></div>
       </section>
       <section class="full-width">
         <div class="section-header">
@@ -165,6 +168,23 @@
           <div><label>网络超时</label><input type="text" id="network-timeout"></div>
         </div>
 
+        <h3 class="settings-group-title">备份</h3>
+        <div class="grid">
+          <div><label>启用备份功能</label><select id="backup-enabled"><option value="true">开启</option><option value="false">关闭</option></select></div>
+          <div><label>远端类型</label><select id="backup-remote-type"><option value="s3_compatible">s3_compatible</option></select></div>
+          <div><label>S3 Endpoint</label><input type="text" id="backup-endpoint" placeholder="https://example.com"></div>
+          <div><label>Region</label><input type="text" id="backup-region"></div>
+          <div><label>Bucket</label><input type="text" id="backup-bucket"></div>
+          <div><label>对象前缀</label><input type="text" id="backup-prefix"></div>
+          <div><label>Access Key ID</label><input type="text" id="backup-access-key-id"></div>
+          <div><label>Secret Access Key</label><input type="password" id="backup-secret-access-key" autocomplete="new-password"></div>
+          <div><label>Path-style</label><select id="backup-path-style"><option value="true">true</option><option value="false">false</option></select></div>
+          <div><label>启用每日 UTC 00:00 自动备份</label><select id="backup-daily-enabled"><option value="true">开启</option><option value="false">关闭</option></select></div>
+          <div><label>启用刷新成功后自动备份</label><select id="backup-after-refresh-enabled"><option value="true">开启</option><option value="false">关闭</option></select></div>
+          <div><label>刷新后延迟</label><input type="text" id="backup-after-refresh-debounce"></div>
+          <div><label>自动备份最小间隔</label><input type="text" id="backup-min-auto-interval"></div>
+        </div>
+
         <div class="toolbar toolbar-top">
           <button type="button" onclick="saveSettings()">保存设置</button>
         </div>
@@ -189,6 +209,25 @@
       <div class="modal-footer">
         <button type="button" class="secondary" onclick="closeCredentialEditor()">取消</button>
         <button type="button" onclick="saveCredentialEditor()">保存</button>
+      </div>
+    </div>
+  </div>
+  <div id="backup-restore-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" onclick="closeBackupRestoreModal()"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="backup-restore-title">
+      <div class="modal-header">
+        <div>
+          <h2 id="backup-restore-title">从备份还原</h2>
+          <div class="muted">这会覆盖当前卷内受管数据，只在卷损坏或数据丢失时使用。</div>
+        </div>
+        <button type="button" class="secondary modal-close" aria-label="关闭" onclick="closeBackupRestoreModal()">X</button>
+      </div>
+      <div id="backup-restore-list" class="backup-snapshot-list"></div>
+      <label class="backup-warning-label" for="backup-restore-confirmation">请输入 <strong>确定还原</strong> 才能继续</label>
+      <input id="backup-restore-confirmation" type="text" class="backup-confirm-input" oninput="syncBackupRestoreConfirm()">
+      <div class="modal-footer">
+        <button type="button" class="secondary" onclick="closeBackupRestoreModal()">取消</button>
+        <button type="button" class="danger" id="backup-restore-submit" onclick="submitBackupRestore()" disabled>确认还原</button>
       </div>
     </div>
   </div>
