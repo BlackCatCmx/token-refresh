@@ -64,8 +64,6 @@ backup:
     after_refresh_enabled: true
     after_refresh_debounce: "5m"
     min_interval_between_auto_backups: "1h"
-  retention:
-    max_snapshots: 1
 
 web:
   enabled: true

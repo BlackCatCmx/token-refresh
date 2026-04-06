@@ -290,9 +290,6 @@ async function saveSettings() {
         after_refresh_debounce: document.getElementById("backup-after-refresh-debounce").value,
         min_interval_between_auto_backups: document.getElementById("backup-min-auto-interval").value,
       },
-      retention: {
-        max_snapshots: 1,
-      },
     },
   };
   await api("api/settings", {

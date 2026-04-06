@@ -263,7 +263,7 @@ impl BackupCoordinator {
             )?
         };
         client.put_object(&snapshot_key, &archive_bytes).await?;
-        trim_old_snapshots(&client, backup.retention.max_snapshots).await?;
+        trim_old_snapshots(&client).await?;
         {
             let mut status = self.inner.status.write().await;
             status.last_success_at = Some(created_at.to_rfc3339());
@@ -483,9 +483,9 @@ fn build_snapshot_key(
     )
 }
 
-async fn trim_old_snapshots(client: &S3CompatibleClient, keep: usize) -> Result<()> {
+async fn trim_old_snapshots(client: &S3CompatibleClient) -> Result<()> {
     let snapshots = client.list_snapshots().await?;
-    for snapshot in snapshots.into_iter().skip(keep) {
+    for snapshot in snapshots.into_iter().skip(1) {
         client.delete_object(&snapshot.key).await?;
     }
     Ok(())

@@ -200,8 +200,6 @@ pub struct BackupConfig {
     pub remote: BackupRemoteConfig,
     #[serde(default)]
     pub schedule: BackupScheduleConfig,
-    #[serde(default)]
-    pub retention: BackupRetentionConfig,
 }
 
 impl Default for BackupConfig {
@@ -210,7 +208,6 @@ impl Default for BackupConfig {
             enabled: default_backup_enabled(),
             remote: BackupRemoteConfig::default(),
             schedule: BackupScheduleConfig::default(),
-            retention: BackupRetentionConfig::default(),
         }
     }
 }
@@ -269,20 +266,6 @@ impl Default for BackupScheduleConfig {
             after_refresh_enabled: default_backup_after_refresh_enabled(),
             after_refresh_debounce: default_backup_after_refresh_debounce(),
             min_interval_between_auto_backups: default_backup_min_interval_between_auto_backups(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BackupRetentionConfig {
-    #[serde(default = "default_backup_max_snapshots")]
-    pub max_snapshots: usize,
-}
-
-impl Default for BackupRetentionConfig {
-    fn default() -> Self {
-        Self {
-            max_snapshots: default_backup_max_snapshots(),
         }
     }
 }
@@ -723,9 +706,6 @@ fn diff_editable_settings(current: &EditableSettings, incoming: &EditableSetting
     {
         changed.push("backup.schedule.min_interval_between_auto_backups".to_string());
     }
-    if current.backup.retention.max_snapshots != incoming.backup.retention.max_snapshots {
-        changed.push("backup.retention.max_snapshots".to_string());
-    }
     changed
 }
 
@@ -841,9 +821,6 @@ fn validate_backup_config(config: &BackupConfig) -> Result<()> {
     }
     parse_duration_str(&config.schedule.after_refresh_debounce)?;
     parse_duration_str(&config.schedule.min_interval_between_auto_backups)?;
-    if config.retention.max_snapshots != 1 {
-        bail!("backup.retention.max_snapshots must be 1");
-    }
     if !config.enabled {
         return Ok(());
     }
@@ -904,10 +881,6 @@ fn default_backup_after_refresh_debounce() -> String {
 
 fn default_backup_min_interval_between_auto_backups() -> String {
     "1h".to_string()
-}
-
-fn default_backup_max_snapshots() -> usize {
-    1
 }
 
 fn default_web_enabled() -> bool {
@@ -986,13 +959,6 @@ mod tests {
         let mut config = AppConfig::default();
         config.refresh.manual_inter_refresh_delay_min = "2m".to_string();
         config.refresh.manual_inter_refresh_delay_max = "30s".to_string();
-        assert!(validate_config(&config).is_err());
-    }
-
-    #[test]
-    fn validate_config_rejects_backup_retention_other_than_one() {
-        let mut config = AppConfig::default();
-        config.backup.retention.max_snapshots = 2;
         assert!(validate_config(&config).is_err());
     }
 }
