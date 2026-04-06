@@ -109,13 +109,24 @@ async function loadBackupStatus() {
   lines.push(`远端配置: ${data.configured ? "已就绪" : "未完成"}`);
   lines.push(`当前状态: ${data.restore_running ? "恢复中" : data.running ? "备份中" : "空闲"}`);
   lines.push(`最近成功: ${data.last_success_at ? shortTime(data.last_success_at) : "无"}`);
-  lines.push(`下次日备份: ${data.next_daily_at ? shortTime(data.next_daily_at) : "未启用"}`);
+  lines.push(`日备份计划: ${formatDailyBackupStatus(data)}`);
   lines.push(`待上传改动: ${data.dirty_pending ? "有" : "无"}`);
   lines.push(`最近错误: ${data.last_error || "无"}`);
   document.getElementById("backup-meta").textContent = lines.join(" | ");
   const canOperate = Boolean(data.enabled && data.configured && !data.running && !data.restore_running);
   document.getElementById("backup-run-btn").disabled = !canOperate;
   document.getElementById("backup-restore-open-btn").disabled = !canOperate;
+}
+
+function formatDailyBackupStatus(data) {
+  if (!data.next_daily_at) return "未启用";
+  const displayTime = shortTime(data.next_daily_at);
+  const dueAt = new Date(data.next_daily_at);
+  if (isNaN(dueAt.getTime())) return displayTime;
+  if (dueAt.getTime() <= Date.now()) {
+    return `${data.running ? "今日执行中" : "今日待执行"}（计划点 ${displayTime}）`;
+  }
+  return displayTime;
 }
 
 function shortTime(rfc3339) {
