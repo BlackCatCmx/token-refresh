@@ -53,7 +53,7 @@ backup:
   remote:
     type: "s3_compatible"
     endpoint: ""
-    region: "us-east-1"
+    region: ""
     bucket: ""
     object_prefix: "token-refresh"
     access_key_id: ""

@@ -641,6 +641,11 @@ pre {
 
 .field-expand > textarea { margin-top: 6px; min-height: 180px; }
 
+.field-expand > .grid,
+.field-expand > .advanced-hint {
+  margin-top: 8px;
+}
+
 /* ── Responsive ── */
 @media (max-width: 800px) {
   .tab-panel--status { grid-template-columns: 1fr; }

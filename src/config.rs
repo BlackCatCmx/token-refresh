@@ -832,9 +832,6 @@ fn validate_backup_config(config: &BackupConfig) -> Result<()> {
     if !matches!(endpoint.scheme(), "http" | "https") {
         bail!("backup.remote.endpoint must use http or https");
     }
-    if config.remote.region.trim().is_empty() {
-        bail!("backup.remote.region is required when backup.enabled=true");
-    }
     if config.remote.bucket.trim().is_empty() {
         bail!("backup.remote.bucket is required when backup.enabled=true");
     }
@@ -856,7 +853,7 @@ fn default_backup_remote_type() -> String {
 }
 
 fn default_backup_region() -> String {
-    "us-east-1".to_string()
+    String::new()
 }
 
 fn default_backup_object_prefix() -> String {

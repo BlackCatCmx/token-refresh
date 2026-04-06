@@ -173,16 +173,22 @@
           <div><label>启用备份功能</label><select id="backup-enabled"><option value="true">开启</option><option value="false">关闭</option></select></div>
           <div><label>远端类型</label><select id="backup-remote-type"><option value="s3_compatible">s3_compatible</option></select></div>
           <div><label>S3 Endpoint</label><input type="text" id="backup-endpoint" placeholder="https://example.com"></div>
-          <div><label>Region</label><input type="text" id="backup-region"></div>
           <div><label>Bucket</label><input type="text" id="backup-bucket"></div>
-          <div><label>对象前缀</label><input type="text" id="backup-prefix"></div>
           <div><label>Access Key ID</label><input type="text" id="backup-access-key-id"></div>
           <div><label>Secret Access Key</label><input type="password" id="backup-secret-access-key" autocomplete="new-password"></div>
-          <div><label>Path-style</label><select id="backup-path-style"><option value="true">true</option><option value="false">false</option></select></div>
           <div><label>启用每日 UTC 00:00 自动备份</label><select id="backup-daily-enabled"><option value="true">开启</option><option value="false">关闭</option></select></div>
           <div><label>启用刷新成功后自动备份</label><select id="backup-after-refresh-enabled"><option value="true">开启</option><option value="false">关闭</option></select></div>
           <div><label>刷新后延迟</label><input type="text" id="backup-after-refresh-debounce"></div>
           <div><label>自动备份最小间隔</label><input type="text" id="backup-min-auto-interval"></div>
+          <details class="field-expand grid-full">
+            <summary>高级选项</summary>
+            <div class="grid advanced-grid">
+              <div><label>Region</label><input type="text" id="backup-region" placeholder="留空自动识别，失败时回退到 us-east-1"></div>
+              <div><label>备份目录前缀</label><input type="text" id="backup-prefix" placeholder="留空则直接写到 snapshots/"></div>
+              <div><label>Path-style</label><select id="backup-path-style"><option value="true">true</option><option value="false">false</option></select></div>
+            </div>
+            <div class="muted advanced-hint">Claw Cloud 建议保留 <code>Path-style=true</code>。Region 留空时会优先从 Endpoint 自动识别。</div>
+          </details>
         </div>
 
         <div class="toolbar toolbar-top">

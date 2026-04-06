@@ -32,7 +32,7 @@ impl S3CompatibleClient {
         )
         .context("failed to build S3 credentials")?;
         let region = Region::Custom {
-            region: config.region.trim().to_string(),
+            region: resolve_region(config.region.trim(), config.endpoint.trim()),
             endpoint: config.endpoint.trim().trim_end_matches('/').to_string(),
         };
         let bucket = Bucket::new(config.bucket.trim(), region, credentials)
@@ -115,12 +115,59 @@ impl S3CompatibleClient {
     }
 }
 
+pub fn resolve_region(region: &str, endpoint: &str) -> String {
+    let region = region.trim();
+    if !region.is_empty() {
+        return region.to_string();
+    }
+    infer_region_from_endpoint(endpoint).unwrap_or_else(|| "us-east-1".to_string())
+}
+
 pub fn parse_snapshot_name_for_display(key: &str) -> (Option<String>, String) {
     parse_snapshot_name(key)
 }
 
 fn normalize_prefix(prefix: &str) -> String {
     prefix.trim_matches('/').to_string()
+}
+
+fn infer_region_from_endpoint(endpoint: &str) -> Option<String> {
+    let host = reqwest::Url::parse(endpoint)
+        .ok()?
+        .host_str()?
+        .to_ascii_lowercase();
+    for label in host.split('.') {
+        if looks_like_region(label) {
+            return Some(label.to_string());
+        }
+    }
+    None
+}
+
+fn looks_like_region(label: &str) -> bool {
+    let mut parts = label.split('-');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let Some(second) = parts.next() else {
+        return false;
+    };
+    let Some(last) = parts.next_back().or(Some(second)) else {
+        return false;
+    };
+    if first.is_empty() || last.is_empty() {
+        return false;
+    }
+    if !first.chars().all(|ch| ch.is_ascii_lowercase()) {
+        return false;
+    }
+    if !label
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return false;
+    }
+    label.contains('-') && last.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn object_path(key: &str) -> String {
@@ -162,4 +209,36 @@ fn parse_snapshot_name(key: &str) -> (Option<String>, String) {
         None
     };
     (created_at, trigger.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_region_prefers_explicit_value() {
+        assert_eq!(
+            resolve_region("ap-southeast-1", "https://objectstorageapi.example.com"),
+            "ap-southeast-1"
+        );
+    }
+
+    #[test]
+    fn resolve_region_infers_from_endpoint() {
+        assert_eq!(
+            resolve_region(
+                "",
+                "https://objectstorageapi.ap-southeast-1.clawcloudrun.com"
+            ),
+            "ap-southeast-1"
+        );
+    }
+
+    #[test]
+    fn resolve_region_falls_back_to_us_east_1() {
+        assert_eq!(
+            resolve_region("", "https://minio.internal.example.com"),
+            "us-east-1"
+        );
+    }
 }

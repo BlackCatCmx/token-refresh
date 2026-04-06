@@ -277,9 +277,9 @@ async function saveSettings() {
       remote: {
         type: document.getElementById("backup-remote-type").value,
         endpoint: document.getElementById("backup-endpoint").value,
-        region: document.getElementById("backup-region").value,
+        region: document.getElementById("backup-region").value.trim(),
         bucket: document.getElementById("backup-bucket").value,
-        object_prefix: document.getElementById("backup-prefix").value,
+        object_prefix: document.getElementById("backup-prefix").value.trim(),
         access_key_id: document.getElementById("backup-access-key-id").value,
         secret_access_key: document.getElementById("backup-secret-access-key").value,
         path_style: document.getElementById("backup-path-style").value === "true",
