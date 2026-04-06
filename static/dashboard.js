@@ -110,6 +110,7 @@ async function loadBackupStatus() {
   lines.push(`当前状态: ${data.restore_running ? "恢复中" : data.running ? "备份中" : "空闲"}`);
   lines.push(`最近成功: ${data.last_success_at ? shortTime(data.last_success_at) : "无"}`);
   lines.push(`日备份计划: ${formatDailyBackupStatus(data)}`);
+  lines.push(`刷新后自动备份: ${formatAfterRefreshBackupStatus(data)}`);
   lines.push(`待上传改动: ${data.dirty_pending ? "有" : "无"}`);
   lines.push(`最近错误: ${data.last_error || "无"}`);
   document.getElementById("backup-meta").textContent = lines.join(" | ");
@@ -129,6 +130,21 @@ function formatDailyBackupStatus(data) {
     return `${data.running ? "今日执行中" : "已到执行时间，等待执行"}（今日计划点 ${displayTime}）`;
   }
   return displayTime;
+}
+
+function formatAfterRefreshBackupStatus(data) {
+  if (!data.enabled) return "未启用";
+  if (!data.configured) return "配置未完成";
+  if (!data.after_refresh_enabled) return "未启用";
+  if (!data.dirty_pending) return "已启用，当前无待处理改动";
+  if (!data.next_after_refresh_at) return "已启用，等待计算";
+  const displayTime = shortTime(data.next_after_refresh_at);
+  const dueAt = new Date(data.next_after_refresh_at);
+  if (isNaN(dueAt.getTime())) return displayTime;
+  if (dueAt.getTime() <= Date.now()) {
+    return `${data.running ? "执行中" : "已到执行时间，等待执行"}（计划点 ${displayTime}）`;
+  }
+  return `预计 ${displayTime}`;
 }
 
 function shortTime(rfc3339) {
@@ -713,7 +729,12 @@ function escapeHtml(value) {
 
 function classifyLogLine(line) {
   const normalized = line.toLowerCase();
-  if (normalized.includes("refresh succeeded") || normalized.includes("refresh_success")) {
+  if (
+    normalized.includes("refresh succeeded") ||
+    normalized.includes("refresh_success") ||
+    normalized.includes("backup uploaded successfully") ||
+    normalized.includes("backup restore completed")
+  ) {
     return "success";
   }
   if (

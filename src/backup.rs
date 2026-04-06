@@ -19,6 +19,7 @@ use crate::write_coordinator::WriteCoordinator;
 pub struct BackupStatus {
     pub enabled: bool,
     pub configured: bool,
+    pub after_refresh_enabled: bool,
     pub running: bool,
     pub restore_running: bool,
     pub dirty_pending: bool,
@@ -26,6 +27,7 @@ pub struct BackupStatus {
     pub last_snapshot_key: Option<String>,
     pub last_error: Option<String>,
     pub next_daily_at: Option<String>,
+    pub next_after_refresh_at: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -172,12 +174,16 @@ impl BackupCoordinator {
         let config = self.inner.config_manager.effective_config().await;
         let configured = is_backup_remote_configured(&config.backup);
         let now = Utc::now();
+        let dirty_since = *self.inner.dirty_since.read().await;
+        let last_daily_backup_for = *self.inner.last_daily_backup_for.read().await;
+        let last_auto_backup_at = *self.inner.last_auto_backup_at.read().await;
         let next_daily_at = if config.backup.enabled && configured {
-            compute_next_daily_at(
-                &config.backup,
-                *self.inner.last_daily_backup_for.read().await,
-                now,
-            )
+            compute_next_daily_at(&config.backup, last_daily_backup_for, now)
+        } else {
+            None
+        };
+        let next_after_refresh_at = if config.backup.enabled && configured {
+            compute_after_refresh_due_at(&config.backup, dirty_since, last_auto_backup_at)?
         } else {
             None
         };
@@ -185,7 +191,9 @@ impl BackupCoordinator {
             let mut status = self.inner.status.write().await;
             status.enabled = config.backup.enabled;
             status.configured = configured;
+            status.after_refresh_enabled = config.backup.schedule.after_refresh_enabled;
             status.next_daily_at = next_daily_at.map(|value| value.to_rfc3339());
+            status.next_after_refresh_at = next_after_refresh_at.map(|value| value.to_rfc3339());
         }
         if !config.backup.enabled || !configured {
             tokio::select! {
@@ -274,6 +282,7 @@ impl BackupCoordinator {
             status.last_snapshot_key = Some(snapshot_key.clone());
             status.last_error = None;
             status.dirty_pending = false;
+            status.next_after_refresh_at = None;
         }
         {
             let mut dirty_since = self.inner.dirty_since.write().await;
@@ -353,26 +362,12 @@ impl BackupCoordinator {
         backup: &BackupConfig,
         now: DateTime<Utc>,
     ) -> Result<bool> {
-        if !backup.schedule.after_refresh_enabled {
-            return Ok(false);
-        }
-        let Some(dirty_since) = *self.inner.dirty_since.read().await else {
+        let dirty_since = *self.inner.dirty_since.read().await;
+        let last_auto = *self.inner.last_auto_backup_at.read().await;
+        let Some(due_at) = compute_after_refresh_due_at(backup, dirty_since, last_auto)? else {
             return Ok(false);
         };
-        let debounce = chrono::Duration::from_std(parse_duration_str(
-            &backup.schedule.after_refresh_debounce,
-        )?)
-        .context("invalid backup after_refresh_debounce")?;
-        let min_interval = chrono::Duration::from_std(parse_duration_str(
-            &backup.schedule.min_interval_between_auto_backups,
-        )?)
-        .context("invalid backup min_interval_between_auto_backups")?;
-        let due_by_dirty = dirty_since + debounce;
-        let last_auto = *self.inner.last_auto_backup_at.read().await;
-        let due_by_interval = last_auto
-            .map(|value| value + min_interval)
-            .unwrap_or(due_by_dirty);
-        Ok(now >= due_by_dirty.max(due_by_interval))
+        Ok(now >= due_at)
     }
 
     async fn next_wait_duration(
@@ -389,25 +384,13 @@ impl BackupCoordinator {
                 .unwrap_or_else(|_| Duration::from_secs(1));
             candidates.push(wait);
         }
-        if backup.schedule.after_refresh_enabled {
-            if let Some(dirty_since) = *self.inner.dirty_since.read().await {
-                let debounce = chrono::Duration::from_std(parse_duration_str(
-                    &backup.schedule.after_refresh_debounce,
-                )?)?;
-                let min_interval = chrono::Duration::from_std(parse_duration_str(
-                    &backup.schedule.min_interval_between_auto_backups,
-                )?)?;
-                let due_by_dirty = dirty_since + debounce;
-                let last_auto = *self.inner.last_auto_backup_at.read().await;
-                let due_by_interval = last_auto
-                    .map(|value| value + min_interval)
-                    .unwrap_or(due_by_dirty);
-                let due_at = due_by_dirty.max(due_by_interval);
-                let wait = (due_at - now)
-                    .to_std()
-                    .unwrap_or_else(|_| Duration::from_secs(1));
-                candidates.push(wait);
-            }
+        let dirty_since = *self.inner.dirty_since.read().await;
+        let last_auto = *self.inner.last_auto_backup_at.read().await;
+        if let Some(due_at) = compute_after_refresh_due_at(backup, dirty_since, last_auto)? {
+            let wait = (due_at - now)
+                .to_std()
+                .unwrap_or_else(|_| Duration::from_secs(1));
+            candidates.push(wait);
         }
         Ok(candidates
             .into_iter()
@@ -464,6 +447,31 @@ fn compute_next_daily_at(
         .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))
 }
 
+fn compute_after_refresh_due_at(
+    backup: &BackupConfig,
+    dirty_since: Option<DateTime<Utc>>,
+    last_auto_backup_at: Option<DateTime<Utc>>,
+) -> Result<Option<DateTime<Utc>>> {
+    if !backup.schedule.after_refresh_enabled {
+        return Ok(None);
+    }
+    let Some(dirty_since) = dirty_since else {
+        return Ok(None);
+    };
+    let debounce =
+        chrono::Duration::from_std(parse_duration_str(&backup.schedule.after_refresh_debounce)?)
+            .context("invalid backup after_refresh_debounce")?;
+    let min_interval = chrono::Duration::from_std(parse_duration_str(
+        &backup.schedule.min_interval_between_auto_backups,
+    )?)
+    .context("invalid backup min_interval_between_auto_backups")?;
+    let due_by_dirty = dirty_since + debounce;
+    let due_by_interval = last_auto_backup_at
+        .map(|value| value + min_interval)
+        .unwrap_or(due_by_dirty);
+    Ok(Some(due_by_dirty.max(due_by_interval)))
+}
+
 fn build_snapshot_key(
     client: &S3CompatibleClient,
     trigger: BackupTrigger,
@@ -492,4 +500,53 @@ async fn trim_old_snapshots(client: &S3CompatibleClient) -> Result<()> {
         client.delete_object(&snapshot.key).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+
+    #[test]
+    fn after_refresh_due_at_uses_debounce_without_previous_auto_backup() {
+        let mut backup = BackupConfig::default();
+        backup.schedule.after_refresh_debounce = "2m".to_string();
+        backup.schedule.min_interval_between_auto_backups = "6h".to_string();
+        let dirty_since = Utc.with_ymd_and_hms(2026, 4, 6, 15, 38, 1).unwrap();
+
+        let due_at = compute_after_refresh_due_at(&backup, Some(dirty_since), None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(due_at, Utc.with_ymd_and_hms(2026, 4, 6, 15, 40, 1).unwrap());
+    }
+
+    #[test]
+    fn after_refresh_due_at_respects_min_interval_from_last_auto_backup() {
+        let mut backup = BackupConfig::default();
+        backup.schedule.after_refresh_debounce = "2m".to_string();
+        backup.schedule.min_interval_between_auto_backups = "6h".to_string();
+        let dirty_since = Utc.with_ymd_and_hms(2026, 4, 6, 15, 38, 1).unwrap();
+        let last_auto_backup_at = Utc.with_ymd_and_hms(2026, 4, 6, 11, 54, 41).unwrap();
+
+        let due_at =
+            compute_after_refresh_due_at(&backup, Some(dirty_since), Some(last_auto_backup_at))
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            due_at,
+            Utc.with_ymd_and_hms(2026, 4, 6, 17, 54, 41).unwrap()
+        );
+    }
+
+    #[test]
+    fn after_refresh_due_at_is_none_when_no_pending_dirty_data() {
+        let backup = BackupConfig::default();
+
+        let due_at = compute_after_refresh_due_at(&backup, None, None).unwrap();
+
+        assert_eq!(due_at, None);
+    }
 }
