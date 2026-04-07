@@ -1,17 +1,21 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
 
 use crate::backup::BackupCoordinator;
 use crate::config::{ConfigManager, parse_duration_str};
 use crate::credential::parse_rfc3339;
 use crate::credential_store::{CredentialStore, CredentialZone};
+use crate::fsutil;
 use crate::logging::LogManager;
 use crate::status::{CredentialStatusRecord, CredentialStatusStore, normalize_status_key};
 use crate::transaction::{RefreshOutcome, RefreshTransaction, due_at};
@@ -37,6 +41,68 @@ pub struct SchedulerStatus {
     pub manual_last_run_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SchedulerPersistedState {
+    #[serde(default = "default_scheduler_enabled")]
+    enabled: bool,
+}
+
+impl Default for SchedulerPersistedState {
+    fn default() -> Self {
+        Self {
+            enabled: default_scheduler_enabled(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SchedulerStateStore {
+    path: PathBuf,
+    state: Mutex<SchedulerPersistedState>,
+}
+
+impl SchedulerStateStore {
+    fn load(path: PathBuf) -> Result<Self> {
+        let state = if path.exists() {
+            let raw = std::fs::read(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            if raw.is_empty() {
+                SchedulerPersistedState::default()
+            } else {
+                serde_json::from_slice::<SchedulerPersistedState>(&raw)
+                    .with_context(|| format!("invalid scheduler state file {}", path.display()))?
+            }
+        } else {
+            SchedulerPersistedState::default()
+        };
+        Ok(Self {
+            path,
+            state: Mutex::new(state),
+        })
+    }
+
+    fn enabled(&self) -> Result<bool> {
+        let guard = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scheduler state lock poisoned"))?;
+        Ok(guard.enabled)
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<()> {
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scheduler state lock poisoned"))?;
+        guard.enabled = enabled;
+        fsutil::atomic_write_json(&self.path, &*guard)
+    }
+}
+
+fn default_scheduler_enabled() -> bool {
+    true
+}
+
 #[derive(Clone)]
 pub struct SchedulerHandle {
     enabled: Arc<AtomicBool>,
@@ -45,6 +111,7 @@ pub struct SchedulerHandle {
     notify: Arc<Notify>,
     status: Arc<RwLock<SchedulerStatus>>,
     backoff_until: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
+    state_store: Arc<SchedulerStateStore>,
 }
 
 #[derive(Clone)]
@@ -64,18 +131,21 @@ struct SchedulerRuntime {
 }
 
 impl SchedulerHandle {
-    pub fn new() -> Self {
-        Self {
-            enabled: Arc::new(AtomicBool::new(true)),
+    pub fn load(state_path: PathBuf) -> Result<Self> {
+        let state_store = Arc::new(SchedulerStateStore::load(state_path)?);
+        let enabled = state_store.enabled()?;
+        Ok(Self {
+            enabled: Arc::new(AtomicBool::new(enabled)),
             manual_busy: Arc::new(AtomicBool::new(false)),
             manual_requested: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
             status: Arc::new(RwLock::new(SchedulerStatus {
-                enabled: true,
+                enabled,
                 ..SchedulerStatus::default()
             })),
             backoff_until: Arc::new(RwLock::new(HashMap::new())),
-        }
+            state_store,
+        })
     }
 
     pub fn spawn_background(
@@ -123,24 +193,16 @@ impl SchedulerHandle {
         });
     }
 
-    pub async fn start(&self) {
-        self.enabled.store(true, Ordering::SeqCst);
-        {
-            let mut status = self.status.write().await;
-            status.enabled = true;
-            status.last_error = None;
-        }
-        self.notify.notify_waiters();
+    pub async fn start(&self) -> Result<()> {
+        self.state_store.set_enabled(true)?;
+        self.set_runtime_enabled(true, true).await;
+        Ok(())
     }
 
-    pub async fn stop(&self) {
-        self.enabled.store(false, Ordering::SeqCst);
-        {
-            let mut status = self.status.write().await;
-            status.enabled = false;
-            status.current_key = None;
-        }
-        self.notify.notify_waiters();
+    pub async fn stop(&self) -> Result<()> {
+        self.state_store.set_enabled(false)?;
+        self.set_runtime_enabled(false, false).await;
+        Ok(())
     }
 
     pub async fn status(&self) -> SchedulerStatus {
@@ -174,6 +236,34 @@ impl SchedulerHandle {
     pub async fn clear_backoff(&self) {
         let mut guard = self.backoff_until.write().await;
         guard.clear();
+    }
+
+    pub fn persisted_enabled(&self) -> Result<bool> {
+        self.state_store.enabled()
+    }
+
+    pub async fn pause(&self) {
+        self.set_runtime_enabled(false, false).await;
+    }
+
+    pub async fn resume(&self) {
+        self.set_runtime_enabled(true, false).await;
+    }
+
+    async fn set_runtime_enabled(&self, enabled: bool, clear_last_error: bool) {
+        self.enabled.store(enabled, Ordering::SeqCst);
+        {
+            let mut status = self.status.write().await;
+            status.enabled = enabled;
+            if !enabled {
+                status.current_key = None;
+                status.next_wake_at = None;
+            }
+            if clear_last_error {
+                status.last_error = None;
+            }
+        }
+        self.notify.notify_waiters();
     }
 }
 
@@ -520,6 +610,7 @@ fn persisted_backoff_until(
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -540,8 +631,23 @@ mod tests {
 
     #[tokio::test]
     async fn manual_refresh_request_rejects_duplicate_triggers() {
-        let handle = SchedulerHandle::new();
+        let temp = tempdir().unwrap();
+        let handle = SchedulerHandle::load(temp.path().join("scheduler_state.json")).unwrap();
         handle.trigger_manual_refresh_all().await.unwrap();
         assert!(handle.trigger_manual_refresh_all().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn persists_enabled_state_across_reloads() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("scheduler_state.json");
+        let handle = SchedulerHandle::load(path.clone()).unwrap();
+        handle.stop().await.unwrap();
+
+        let reloaded = SchedulerHandle::load(path).unwrap();
+        assert!(!reloaded.status().await.enabled);
+
+        reloaded.start().await.unwrap();
+        assert!(reloaded.status().await.enabled);
     }
 }

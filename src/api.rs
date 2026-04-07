@@ -686,25 +686,33 @@ async fn download_credential_archive(
 }
 
 async fn start_scheduler(State(state): State<Arc<AppState>>) -> Response {
-    state.scheduler.start().await;
-    let _ = state
-        .logger
-        .runtime("info", "scheduler enabled from web console");
-    Json(SimpleMessage {
-        message: "自动刷新已开启".to_string(),
-    })
-    .into_response()
+    match state.scheduler.start().await {
+        Ok(()) => {
+            let _ = state
+                .logger
+                .runtime("info", "scheduler enabled from web console");
+            Json(SimpleMessage {
+                message: "自动刷新已开启".to_string(),
+            })
+            .into_response()
+        }
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
 }
 
 async fn stop_scheduler(State(state): State<Arc<AppState>>) -> Response {
-    state.scheduler.stop().await;
-    let _ = state
-        .logger
-        .runtime("info", "scheduler disabled from web console");
-    Json(SimpleMessage {
-        message: "自动刷新已停止".to_string(),
-    })
-    .into_response()
+    match state.scheduler.stop().await {
+        Ok(()) => {
+            let _ = state
+                .logger
+                .runtime("info", "scheduler disabled from web console");
+            Json(SimpleMessage {
+                message: "自动刷新已停止".to_string(),
+            })
+            .into_response()
+        }
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
 }
 
 async fn trigger_manual_refresh_all(State(state): State<Arc<AppState>>) -> Response {

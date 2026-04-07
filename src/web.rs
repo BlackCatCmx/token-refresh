@@ -136,7 +136,7 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         logger.clone(),
         write_coordinator.clone(),
     ));
-    let scheduler = SchedulerHandle::new();
+    let scheduler = SchedulerHandle::load(config.state_dir.join("scheduler_state.json"))?;
     let backup = Arc::new(BackupCoordinator::new(
         config_manager.clone(),
         store.clone(),

@@ -353,8 +353,7 @@ impl BackupCoordinator {
         let backup = ensure_backup_ready(&config.backup)?;
         let client = S3CompatibleClient::new(&backup.remote)?;
         let freeze_guard = self.inner.write_coordinator.begin_restore()?;
-        let scheduler_was_enabled = self.inner.scheduler.status().await.enabled;
-        self.inner.scheduler.stop().await;
+        self.inner.scheduler.pause().await;
         let result = async {
             let archive_bytes = client.get_object(snapshot_key).await?;
             let parsed_snapshot = backup_archive::parse_snapshot_archive(&archive_bytes)?;
@@ -371,8 +370,8 @@ impl BackupCoordinator {
         }
         .await;
         drop(freeze_guard);
-        if scheduler_was_enabled {
-            self.inner.scheduler.start().await;
+        if self.inner.scheduler.persisted_enabled()? {
+            self.inner.scheduler.resume().await;
         }
         let restored = result?;
         self.inner.logger.runtime(
