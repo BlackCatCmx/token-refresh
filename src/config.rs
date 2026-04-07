@@ -130,12 +130,15 @@ impl Default for ProxyConfig {
 pub struct CredentialManagementConfig {
     #[serde(default = "default_abnormal_threshold")]
     pub abnormal_threshold: u32,
+    #[serde(default = "default_credential_page_size")]
+    pub credential_page_size: usize,
 }
 
 impl Default for CredentialManagementConfig {
     fn default() -> Self {
         Self {
             abnormal_threshold: default_abnormal_threshold(),
+            credential_page_size: default_credential_page_size(),
         }
     }
 }
@@ -772,6 +775,10 @@ fn default_proxy_mode() -> String {
 
 fn default_abnormal_threshold() -> u32 {
     1
+}
+
+fn default_credential_page_size() -> usize {
+    50
 }
 
 fn default_refresh_interval() -> String {

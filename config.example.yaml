@@ -35,6 +35,7 @@ proxy:
 
 credential_management:
   abnormal_threshold: 1
+  credential_page_size: 50
 
 refresh:
   interval: "6h"

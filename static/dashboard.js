@@ -1,6 +1,11 @@
 let schedulerPollTimer = null;
 let schedulerManualActive = false;
 let backupStatusCache = null;
+let credPageSize = 50;
+const credState = {
+  normal: { page: 1, data: [] },
+  abnormal: { page: 1, data: [] },
+};
 // Keep this aligned with the backend clamp in src/api.rs.
 const LOG_LINE_LIMIT = 50;
 // Deterministic abnormal credential codes mirrored from backend refresh classification.
@@ -189,6 +194,9 @@ async function loadSettings() {
   document.getElementById("proxy-mode").value = data.settings.proxy.mode;
   document.getElementById("proxy-list").value = data.settings.proxy.list;
   document.getElementById("abnormal-threshold").value = data.settings.credential_management.abnormal_threshold;
+  const pageSize = data.settings.credential_management.credential_page_size || 50;
+  document.getElementById("credential-page-size").value = pageSize;
+  credPageSize = pageSize;
   document.getElementById("refresh-interval").value = data.settings.refresh.interval;
   document.getElementById("lead-time").value = data.settings.refresh.lead_time;
   document.getElementById("auto-delay-min").value = data.settings.refresh.inter_refresh_delay_min;
@@ -213,7 +221,7 @@ async function loadSettings() {
   syncUserAgentMode();
   renderHeaderPreview(data.header_preview);
   document.getElementById("settings-meta").textContent = `配置文件: ${data.config_path} | 环境变量锁定项: ${data.locked_fields.join(", ") || "无"}`;
-  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout", "backup-enabled", "backup-remote-type", "backup-endpoint", "backup-region", "backup-bucket", "backup-prefix", "backup-access-key-id", "backup-secret-access-key", "backup-path-style", "backup-daily-enabled", "backup-after-refresh-enabled", "backup-after-refresh-debounce", "backup-min-auto-interval"]) {
+  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "credential-page-size", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout", "backup-enabled", "backup-remote-type", "backup-endpoint", "backup-region", "backup-bucket", "backup-prefix", "backup-access-key-id", "backup-secret-access-key", "backup-path-style", "backup-daily-enabled", "backup-after-refresh-enabled", "backup-after-refresh-debounce", "backup-min-auto-interval"]) {
     document.getElementById(field).disabled = false;
   }
   const lockMap = {
@@ -229,6 +237,7 @@ async function loadSettings() {
     "proxy.mode": ["proxy-mode"],
     "proxy.list": ["proxy-list"],
     "credential_management.abnormal_threshold": ["abnormal-threshold"],
+    "credential_management.credential_page_size": ["credential-page-size"],
     "refresh.interval": ["refresh-interval"],
     "refresh.lead_time": ["lead-time"],
     "refresh.inter_refresh_delay_min": ["auto-delay-min"],
@@ -306,6 +315,7 @@ async function saveSettings() {
     },
     credential_management: {
       abnormal_threshold: Number(document.getElementById("abnormal-threshold").value),
+      credential_page_size: Number(document.getElementById("credential-page-size").value) || 50,
     },
     refresh: {
       interval: document.getElementById("refresh-interval").value,
@@ -352,53 +362,92 @@ async function saveSettings() {
 
 async function loadCredentials(zone) {
   const data = await api(`api/credentials?zone=${zone}`);
-  const container = document.getElementById(`${zone}-cards`);
-  container.innerHTML = "";
   document.getElementById(`${zone}-select-all`).checked = false;
   const countEl = document.getElementById(`${zone}-count`);
   if (countEl) countEl.textContent = `(${data.items.length})`;
-  if (data.items.length === 0) {
+  credState[zone].data = data.items;
+  credState[zone].page = 1;
+  renderCredentials(zone);
+}
+
+function renderCredentials(zone) {
+  const { data, page } = credState[zone];
+  const ps = credPageSize;
+  const total = data.length;
+  const totalPages = Math.max(1, Math.ceil(total / ps));
+  const clampedPage = Math.min(Math.max(1, page), totalPages);
+  if (clampedPage !== credState[zone].page) credState[zone].page = clampedPage;
+  const start = (clampedPage - 1) * ps;
+  const pageItems = data.slice(start, start + ps);
+
+  const container = document.getElementById(`${zone}-cards`);
+  container.innerHTML = "";
+  document.getElementById(`${zone}-select-all`).checked = false;
+
+  if (total === 0) {
     container.innerHTML = `<div class="empty-hint">暂无凭证</div>`;
+  } else {
+    for (const row of pageItems) {
+      container.appendChild(buildCredCard(zone, row));
+    }
+  }
+  renderPager(zone, total, clampedPage, ps);
+}
+
+function buildCredCard(zone, row) {
+  const encodedName = encodeURIComponent(row.name);
+  const statusBadge = row.zone === "abnormal"
+    ? '<span class="pill pill-warn">异常区</span>'
+    : '<span class="pill">正常</span>';
+  const failure = row.last_failure_code
+    ? `<div class="cred-error">${escapeHtml(row.last_failure_code)} (${row.consecutive_failure_count})${row.last_failure_reason ? " — " + escapeHtml(row.last_failure_reason) : ""}</div>`
+    : "";
+  const parseErr = row.parse_error
+    ? `<div class="cred-error">${escapeHtml(row.parse_error)}</div>`
+    : "";
+  const displayName = row.email || row.name;
+  const actions = zone === "normal"
+    ? `<button type="button" onclick="manualRefresh('${encodedName}', this)">刷新</button>
+       <button type="button" class="secondary" onclick="openCredentialEditor('${zone}','${encodedName}')">编辑</button>
+       <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
+       <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`
+    : `<button type="button" onclick="restoreCredential('${encodedName}')">恢复</button>
+       <button type="button" class="secondary" onclick="openCredentialEditor('${zone}','${encodedName}')">编辑</button>
+       <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
+       <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`;
+  const card = document.createElement("div");
+  card.className = `cred-card cred-card--${zone}`;
+  card.innerHTML = `
+    <div class="cred-card-top">
+      <input type="checkbox" class="row-check card-check" data-zone="${zone}" data-name="${encodedName}" onchange="syncSelectAll('${zone}')">
+      <span class="cred-name">${escapeHtml(displayName)}</span>
+      ${statusBadge}
+    </div>
+    ${failure}${parseErr}
+    <div class="cred-card-actions">${actions}</div>
+  `;
+  return card;
+}
+
+function renderPager(zone, total, page, pageSize) {
+  const el = document.getElementById(`${zone}-pager`);
+  if (!el) return;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (totalPages <= 1) {
+    el.innerHTML = "";
     return;
   }
-  for (const row of data.items) {
-    const encodedName = encodeURIComponent(row.name);
-    const statusBadge = row.zone === "abnormal"
-      ? '<span class="pill pill-warn">异常区</span>'
-      : '<span class="pill">正常</span>';
-    const failure = row.last_failure_code
-      ? `<div class="cred-error">${escapeHtml(row.last_failure_code)} (${row.consecutive_failure_count})${row.last_failure_reason ? " — " + escapeHtml(row.last_failure_reason) : ""}</div>`
-      : "";
-    const parseErr = row.parse_error
-      ? `<div class="cred-error">${escapeHtml(row.parse_error)}</div>`
-      : "";
-    const actions = zone === "normal"
-      ? `<button type="button" onclick="manualRefresh('${encodedName}', this)">刷新</button>
-         <button type="button" class="secondary" onclick="openCredentialEditor('${zone}','${encodedName}')">编辑</button>
-         <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
-         <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`
-      : `<button type="button" onclick="restoreCredential('${encodedName}')">恢复</button>
-         <button type="button" class="secondary" onclick="openCredentialEditor('${zone}','${encodedName}')">编辑</button>
-         <button type="button" class="secondary" onclick="downloadCredential('${zone}','${encodedName}')">下载</button>
-         <button type="button" class="danger" onclick="deleteCredential('${zone}','${encodedName}')">删除</button>`;
-    const card = document.createElement("div");
-    card.className = `cred-card cred-card--${zone}`;
-    card.innerHTML = `
-      <div class="cred-card-top">
-        <input type="checkbox" class="row-check card-check" data-zone="${zone}" data-name="${encodedName}" onchange="syncSelectAll('${zone}')">
-        <span class="cred-name">${escapeHtml(row.name)}</span>
-        ${statusBadge}
-      </div>
-      <div class="cred-card-info">
-        <div class="cred-row"><span class="muted">邮箱</span><span>${escapeHtml(row.email || "—")}</span></div>
-        <div class="cred-row"><span class="muted">最近刷新</span><span>${escapeHtml(row.last_refresh ? shortTime(row.last_refresh) : "—")}</span></div>
-        <div class="cred-row"><span class="muted">过期时间</span><span>${escapeHtml(row.expired ? shortTime(row.expired) : "—")}</span></div>
-      </div>
-      ${failure}${parseErr}
-      <div class="cred-card-actions">${actions}</div>
-    `;
-    container.appendChild(card);
-  }
+  el.innerHTML = `
+    <button type="button" class="secondary" onclick="goCredPage('${zone}', ${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+    <span class="pager-info">第 ${page} / ${totalPages} 页（共 ${total} 条）</span>
+    <button type="button" class="secondary" onclick="goCredPage('${zone}', ${page + 1})" ${page >= totalPages ? "disabled" : ""}>下一页</button>
+  `;
+}
+
+function goCredPage(zone, page) {
+  credState[zone].page = page;
+  renderCredentials(zone);
+  document.getElementById(`${zone}-cards`).scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function selectedNames(zone) {
@@ -520,6 +569,21 @@ async function openCredentialEditor(zone, name) {
     credentialEditorState.name = decodedName;
     document.getElementById("credential-editor-meta").textContent = `${zone === "normal" ? "正常区" : "异常区"} / ${decodedName}`;
     document.getElementById("credential-editor-content").value = data.content;
+
+    const row = credState[zone]?.data.find((r) => r.name === decodedName);
+    const infoPanel = document.getElementById("credential-editor-info");
+    if (infoPanel && row) {
+      infoPanel.innerHTML = `
+        <div class="info-panel-title">凭证信息</div>
+        <div class="info-panel-row"><span class="muted">文件名</span><span class="info-val">${escapeHtml(decodedName)}</span></div>
+        <div class="info-panel-row"><span class="muted">邮箱</span><span class="info-val">${escapeHtml(row.email || "—")}</span></div>
+        <div class="info-panel-row"><span class="muted">最近刷新</span><span class="info-val">${escapeHtml(row.last_refresh ? shortTime(row.last_refresh) : "—")}</span></div>
+        <div class="info-panel-row"><span class="muted">过期时间</span><span class="info-val">${escapeHtml(row.expired ? shortTime(row.expired) : "—")}</span></div>
+      `;
+    } else if (infoPanel) {
+      infoPanel.innerHTML = "";
+    }
+
     const modal = document.getElementById("credential-editor-modal");
     modal.classList.remove("hidden");
     modal.setAttribute("aria-hidden", "false");
@@ -534,6 +598,8 @@ function closeCredentialEditor() {
   credentialEditorState.zone = null;
   credentialEditorState.name = null;
   document.getElementById("credential-editor-content").value = "";
+  const infoPanel = document.getElementById("credential-editor-info");
+  if (infoPanel) infoPanel.innerHTML = "";
   const modal = document.getElementById("credential-editor-modal");
   modal.classList.add("hidden");
   modal.setAttribute("aria-hidden", "true");
@@ -833,6 +899,7 @@ window.clearLog = clearLog;
 window.logout = logout;
 window.toggleAll = toggleAll;
 window.syncSelectAll = syncSelectAll;
+window.goCredPage = goCredPage;
 window.switchTab = switchTab;
 
 document.addEventListener("DOMContentLoaded", () => {

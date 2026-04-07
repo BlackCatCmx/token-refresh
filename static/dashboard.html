@@ -99,6 +99,7 @@
           </div>
         </div>
         <div id="normal-cards" class="cred-grid"></div>
+        <div id="normal-pager" class="cred-pager"></div>
       </section>
       <section class="full-width">
         <div class="section-header">
@@ -112,6 +113,7 @@
           </div>
         </div>
         <div id="abnormal-cards" class="cred-grid"></div>
+        <div id="abnormal-pager" class="cred-pager"></div>
       </section>
     </div>
 
@@ -135,6 +137,7 @@
         <h3 class="settings-group-title">凭证管理</h3>
         <div class="grid">
           <div><label>异常阈值</label><input type="number" id="abnormal-threshold" min="1"></div>
+          <div><label>凭证分页大小</label><input type="number" id="credential-page-size" min="1"></div>
         </div>
 
         <h3 class="settings-group-title">自动刷新调度</h3>
@@ -213,7 +216,10 @@
         </div>
         <button type="button" class="secondary modal-close" aria-label="关闭" onclick="closeCredentialEditor()">X</button>
       </div>
-      <textarea id="credential-editor-content" class="modal-textarea" spellcheck="false" placeholder="在这里编辑 JSON 内容"></textarea>
+      <div class="modal-editor-layout">
+        <aside class="modal-info-panel" id="credential-editor-info"></aside>
+        <textarea id="credential-editor-content" class="modal-textarea" spellcheck="false" placeholder="在这里编辑 JSON 内容"></textarea>
+      </div>
       <div class="modal-footer">
         <button type="button" class="secondary" onclick="closeCredentialEditor()">取消</button>
         <button type="button" onclick="saveCredentialEditor()">保存</button>
