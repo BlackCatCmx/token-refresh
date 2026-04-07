@@ -1,9 +1,11 @@
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
+use tempfile::Builder;
 use tokio::sync::{Notify, RwLock};
 
 use crate::backup_archive::{self, RestoredSnapshot};
@@ -265,16 +267,47 @@ impl BackupCoordinator {
         let client = S3CompatibleClient::new(&backup.remote)?;
         let created_at = Utc::now();
         let snapshot_key = build_snapshot_key(&client, trigger, created_at);
-        let archive_bytes = {
+        let temp_dir = config.state_dir.join("tmp");
+        std::fs::create_dir_all(&temp_dir)
+            .with_context(|| format!("failed to create {}", temp_dir.display()))?;
+        let mut archive_file = Builder::new()
+            .prefix("snapshot-")
+            .suffix(".zip")
+            .tempfile_in(&temp_dir)
+            .with_context(|| format!("failed to create temp snapshot in {}", temp_dir.display()))?;
+        {
             let _guard = self.inner.write_coordinator.lock_commit().await;
-            backup_archive::build_snapshot_archive(
+            backup_archive::build_snapshot_archive_to_writer(
+                archive_file.as_file_mut(),
                 &self.inner.store,
                 &self.inner.status_store,
                 trigger.as_str(),
                 created_at,
-            )?
-        };
-        client.put_object(&snapshot_key, &archive_bytes).await?;
+            )?;
+        }
+        archive_file
+            .as_file_mut()
+            .flush()
+            .context("failed to flush temporary snapshot archive")?;
+        archive_file
+            .as_file_mut()
+            .sync_all()
+            .context("failed to sync temporary snapshot archive")?;
+        let archive_size = archive_file
+            .as_file()
+            .metadata()
+            .context("failed to inspect temporary snapshot archive")?
+            .len();
+        let mut upload_handle = archive_file
+            .reopen()
+            .context("failed to reopen temporary snapshot archive")?;
+        upload_handle
+            .seek(SeekFrom::Start(0))
+            .context("failed to rewind temporary snapshot archive")?;
+        let mut upload_file = tokio::fs::File::from_std(upload_handle);
+        client
+            .put_object_stream(&snapshot_key, &mut upload_file)
+            .await?;
         trim_old_snapshots(&client).await?;
         {
             let mut status = self.inner.status.write().await;
@@ -308,7 +341,7 @@ impl BackupCoordinator {
             crate::s3_compatible::parse_snapshot_name_for_display(&snapshot_key);
         Ok(RemoteSnapshot {
             key: snapshot_key,
-            size: archive_bytes.len() as u64,
+            size: archive_size,
             last_modified: Some(created_at.to_rfc3339()),
             created_at: created_at_display,
             trigger: trigger_display,

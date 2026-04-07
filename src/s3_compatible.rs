@@ -3,6 +3,7 @@ use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use s3::Bucket;
 use s3::creds::Credentials;
 use s3::region::Region;
+use tokio::io::AsyncRead;
 
 use crate::config::BackupRemoteConfig;
 
@@ -53,6 +54,21 @@ impl S3CompatibleClient {
         let response = self
             .bucket
             .put_object(object_path, bytes)
+            .await
+            .context("failed to upload backup object")?;
+        ensure_status(response.status_code(), &[200, 201], "上传备份")?;
+        Ok(())
+    }
+
+    pub async fn put_object_stream<R: AsyncRead + Unpin + ?Sized>(
+        &self,
+        key: &str,
+        reader: &mut R,
+    ) -> Result<()> {
+        let object_path = object_path(key);
+        let response = self
+            .bucket
+            .put_object_stream(reader, object_path)
             .await
             .context("failed to upload backup object")?;
         ensure_status(response.status_code(), &[200, 201], "上传备份")?;

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Component, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -53,26 +53,59 @@ pub fn build_snapshot_archive(
     trigger: &str,
     created_at: DateTime<Utc>,
 ) -> Result<Vec<u8>> {
-    let mut files = Vec::new();
+    let cursor = Cursor::new(Vec::new());
+    let cursor =
+        build_snapshot_archive_to_writer(cursor, store, status_store, trigger, created_at)?;
+    Ok(cursor.into_inner())
+}
+
+pub fn build_snapshot_archive_to_writer<W: Write + Seek>(
+    writer: W,
+    store: &CredentialStore,
+    status_store: &CredentialStatusStore,
+    trigger: &str,
+    created_at: DateTime<Utc>,
+) -> Result<W> {
     let normal_entries = store.scan_zone(CredentialZone::Normal)?;
     let abnormal_entries = store.scan_zone(CredentialZone::Abnormal)?;
+    let mut manifest_entries = Vec::new();
+    let mut writer = zip::ZipWriter::new(writer);
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+
     for entry in &normal_entries {
-        files.push((
-            format!("normal/{}", entry.key),
-            store.read_bytes(CredentialZone::Normal, &entry.key)?,
-        ));
+        let archive_path = format!("normal/{}", entry.key);
+        let bytes = store.read_bytes(CredentialZone::Normal, &entry.key)?;
+        write_snapshot_entry(
+            &mut writer,
+            &archive_path,
+            &bytes,
+            options,
+            &mut manifest_entries,
+        )?;
     }
     for entry in &abnormal_entries {
-        files.push((
-            format!("abnormal/{}", entry.key),
-            store.read_bytes(CredentialZone::Abnormal, &entry.key)?,
-        ));
+        let archive_path = format!("abnormal/{}", entry.key);
+        let bytes = store.read_bytes(CredentialZone::Abnormal, &entry.key)?;
+        write_snapshot_entry(
+            &mut writer,
+            &archive_path,
+            &bytes,
+            options,
+            &mut manifest_entries,
+        )?;
     }
+
     let status_records = status_store.all()?;
     let mut status_bytes = serde_json::to_vec_pretty(&status_records)
         .context("failed to serialize credential_status.json")?;
     status_bytes.push(b'\n');
-    files.push((STATUS_PATH.to_string(), status_bytes));
+    write_snapshot_entry(
+        &mut writer,
+        STATUS_PATH,
+        &status_bytes,
+        options,
+        &mut manifest_entries,
+    )?;
 
     let manifest = SnapshotManifest {
         version: 1,
@@ -81,29 +114,15 @@ pub fn build_snapshot_archive(
         normal_count: normal_entries.len(),
         abnormal_count: abnormal_entries.len(),
         status_present: true,
-        entries: files
-            .iter()
-            .map(|(path, bytes)| SnapshotManifestEntry {
-                path: path.clone(),
-                sha256: sha256_hex(bytes),
-                size: bytes.len(),
-            })
-            .collect(),
+        entries: manifest_entries,
     };
-
-    let cursor = Cursor::new(Vec::new());
-    let mut writer = zip::ZipWriter::new(cursor);
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
-    for (path, bytes) in files {
-        writer.start_file(path, options)?;
-        writer.write_all(&bytes)?;
-    }
     writer.start_file(MANIFEST_PATH, options)?;
     writer.write_all(
         &serde_json::to_vec_pretty(&manifest).context("failed to serialize manifest.json")?,
     )?;
-    let cursor = writer.finish()?;
-    Ok(cursor.into_inner())
+    writer
+        .finish()
+        .context("failed to finalize snapshot archive")
 }
 
 pub fn parse_snapshot_archive(bytes: &[u8]) -> Result<ParsedSnapshot> {
@@ -239,6 +258,23 @@ fn replace_zone(
     Ok(())
 }
 
+fn write_snapshot_entry<W: Write + Seek>(
+    writer: &mut zip::ZipWriter<W>,
+    path: &str,
+    bytes: &[u8],
+    options: FileOptions,
+    manifest_entries: &mut Vec<SnapshotManifestEntry>,
+) -> Result<()> {
+    writer.start_file(path, options)?;
+    writer.write_all(bytes)?;
+    manifest_entries.push(SnapshotManifestEntry {
+        path: path.to_string(),
+        sha256: sha256_hex(bytes),
+        size: bytes.len(),
+    });
+    Ok(())
+}
+
 fn validate_snapshot_path(path: &str) -> Result<()> {
     if path == STATUS_PATH {
         return Ok(());
@@ -335,5 +371,43 @@ mod tests {
                 .is_ok()
         );
         assert!(status_store.get("user.json").unwrap().is_some());
+    }
+
+    #[test]
+    fn snapshot_writer_variant_persists_archive_to_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        config.state_dir = temp.path().join("state");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let status_store =
+            CredentialStatusStore::load(config.state_dir.join("credential_status.json")).unwrap();
+        let credential = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "user.json", &credential)
+            .unwrap();
+        status_store.record_success("user.json", "normal").unwrap();
+
+        let mut archive_file = tempfile::NamedTempFile::new_in(temp.path()).unwrap();
+        build_snapshot_archive_to_writer(
+            archive_file.as_file_mut(),
+            &store,
+            &status_store,
+            "manual",
+            Utc::now(),
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(archive_file.path()).unwrap();
+        let parsed = parse_snapshot_archive(&bytes).unwrap();
+        assert_eq!(parsed.manifest.normal_count, 1);
+        assert_eq!(parsed.manifest.trigger, "manual");
+        assert!(parsed.normal_files.contains_key("user.json"));
     }
 }
