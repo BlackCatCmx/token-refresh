@@ -485,6 +485,9 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
     if config.credential_management.abnormal_threshold == 0 {
         bail!("credential_management.abnormal_threshold must be >= 1");
     }
+    if config.credential_management.credential_page_size == 0 {
+        bail!("credential_management.credential_page_size must be >= 1");
+    }
     parse_duration_str(&config.refresh.interval)?;
     parse_duration_str(&config.refresh.lead_time)?;
     parse_duration_str(&config.refresh.min_sleep)?;
@@ -635,6 +638,11 @@ fn diff_editable_settings(current: &EditableSettings, incoming: &EditableSetting
         != incoming.credential_management.abnormal_threshold
     {
         changed.push("credential_management.abnormal_threshold".to_string());
+    }
+    if current.credential_management.credential_page_size
+        != incoming.credential_management.credential_page_size
+    {
+        changed.push("credential_management.credential_page_size".to_string());
     }
     if current.refresh.interval != incoming.refresh.interval {
         changed.push("refresh.interval".to_string());
@@ -963,6 +971,13 @@ mod tests {
         let mut config = AppConfig::default();
         config.refresh.manual_inter_refresh_delay_min = "2m".to_string();
         config.refresh.manual_inter_refresh_delay_max = "30s".to_string();
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_config_rejects_zero_credential_page_size() {
+        let mut config = AppConfig::default();
+        config.credential_management.credential_page_size = 0;
         assert!(validate_config(&config).is_err());
     }
 }

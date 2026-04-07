@@ -3,8 +3,8 @@ let schedulerManualActive = false;
 let backupStatusCache = null;
 let credPageSize = 50;
 const credState = {
-  normal: { page: 1, data: [] },
-  abnormal: { page: 1, data: [] },
+  normal: { page: 1, data: [], selected: new Set() },
+  abnormal: { page: 1, data: [], selected: new Set() },
 };
 // Keep this aligned with the backend clamp in src/api.rs.
 const LOG_LINE_LIMIT = 50;
@@ -36,10 +36,10 @@ async function api(url, options = {}) {
 }
 
 async function refreshAll() {
+  await loadSettings();
   await Promise.all([
     loadScheduler(),
     loadBackupStatus(),
-    loadSettings(),
     loadCredentials("normal"),
     loadCredentials("abnormal"),
     reloadLog("runtime"),
@@ -181,7 +181,22 @@ async function schedulerAction(action) {
   await loadScheduler();
 }
 
-async function loadSettings() {
+function normalizeCredentialPageSize(value) {
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 50;
+}
+
+function applyCredentialPageSize(value, rerenderCredentials = false) {
+  const normalized = normalizeCredentialPageSize(value);
+  credPageSize = normalized;
+  document.getElementById("credential-page-size").value = normalized;
+  if (rerenderCredentials) {
+    renderCredentials("normal");
+    renderCredentials("abnormal");
+  }
+}
+
+async function loadSettings(rerenderCredentials = false) {
   const data = await api("api/settings");
   document.getElementById("originator").value = data.settings.request_identity.originator;
   document.getElementById("user-agent-mode").value = data.settings.request_identity.user_agent_mode;
@@ -194,9 +209,7 @@ async function loadSettings() {
   document.getElementById("proxy-mode").value = data.settings.proxy.mode;
   document.getElementById("proxy-list").value = data.settings.proxy.list;
   document.getElementById("abnormal-threshold").value = data.settings.credential_management.abnormal_threshold;
-  const pageSize = data.settings.credential_management.credential_page_size || 50;
-  document.getElementById("credential-page-size").value = pageSize;
-  credPageSize = pageSize;
+  applyCredentialPageSize(data.settings.credential_management.credential_page_size, rerenderCredentials);
   document.getElementById("refresh-interval").value = data.settings.refresh.interval;
   document.getElementById("lead-time").value = data.settings.refresh.lead_time;
   document.getElementById("auto-delay-min").value = data.settings.refresh.inter_refresh_delay_min;
@@ -315,7 +328,7 @@ async function saveSettings() {
     },
     credential_management: {
       abnormal_threshold: Number(document.getElementById("abnormal-threshold").value),
-      credential_page_size: Number(document.getElementById("credential-page-size").value) || 50,
+      credential_page_size: normalizeCredentialPageSize(document.getElementById("credential-page-size").value),
     },
     refresh: {
       interval: document.getElementById("refresh-interval").value,
@@ -354,7 +367,7 @@ async function saveSettings() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  await loadSettings();
+  await loadSettings(true);
   await loadBackupStatus();
   await loadScheduler();
   alert("设置已保存");
@@ -362,11 +375,14 @@ async function saveSettings() {
 
 async function loadCredentials(zone) {
   const data = await api(`api/credentials?zone=${zone}`);
-  document.getElementById(`${zone}-select-all`).checked = false;
   const countEl = document.getElementById(`${zone}-count`);
   if (countEl) countEl.textContent = `(${data.items.length})`;
+  const selected = credState[zone].selected;
+  const validNames = new Set(data.items.map((item) => item.name));
   credState[zone].data = data.items;
-  credState[zone].page = 1;
+  credState[zone].selected = new Set(
+    Array.from(selected).filter((name) => validNames.has(name))
+  );
   renderCredentials(zone);
 }
 
@@ -382,7 +398,6 @@ function renderCredentials(zone) {
 
   const container = document.getElementById(`${zone}-cards`);
   container.innerHTML = "";
-  document.getElementById(`${zone}-select-all`).checked = false;
 
   if (total === 0) {
     container.innerHTML = `<div class="empty-hint">暂无凭证</div>`;
@@ -392,6 +407,7 @@ function renderCredentials(zone) {
     }
   }
   renderPager(zone, total, clampedPage, ps);
+  updateSelectAllControl(zone);
 }
 
 function buildCredCard(zone, row) {
@@ -419,7 +435,7 @@ function buildCredCard(zone, row) {
   card.className = `cred-card cred-card--${zone}`;
   card.innerHTML = `
     <div class="cred-card-top">
-      <input type="checkbox" class="row-check card-check" data-zone="${zone}" data-name="${encodedName}" onchange="syncSelectAll('${zone}')">
+      <input type="checkbox" class="row-check card-check" data-zone="${zone}" data-name="${encodedName}" onchange="toggleRowSelection('${zone}', '${encodedName}', this.checked)" ${credState[zone].selected.has(row.name) ? "checked" : ""}>
       <span class="cred-name">${escapeHtml(displayName)}</span>
       ${statusBadge}
     </div>
@@ -451,24 +467,38 @@ function goCredPage(zone, page) {
 }
 
 function selectedNames(zone) {
-  return Array.from(document.querySelectorAll(`.row-check[data-zone="${zone}"]:checked`))
-    .map((element) => decodeURIComponent(element.dataset.name));
+  return Array.from(credState[zone].selected);
 }
 
 function toggleAll(zone, checked) {
-  for (const element of document.querySelectorAll(`.row-check[data-zone="${zone}"]`)) {
-    element.checked = checked;
-  }
+  credState[zone].selected = checked
+    ? new Set(credState[zone].data.map((row) => row.name))
+    : new Set();
+  renderCredentials(zone);
 }
 
-function syncSelectAll(zone) {
-  const all = Array.from(document.querySelectorAll(`.row-check[data-zone="${zone}"]`));
+function toggleRowSelection(zone, name, checked) {
+  const decodedName = decodeURIComponent(name);
+  if (checked) {
+    credState[zone].selected.add(decodedName);
+  } else {
+    credState[zone].selected.delete(decodedName);
+  }
+  updateSelectAllControl(zone);
+}
+
+function updateSelectAllControl(zone) {
   const selectAll = document.getElementById(`${zone}-select-all`);
-  if (all.length === 0) {
+  if (!selectAll) return;
+  const total = credState[zone].data.length;
+  const selectedCount = credState[zone].selected.size;
+  if (total === 0) {
+    selectAll.indeterminate = false;
     selectAll.checked = false;
     return;
   }
-  selectAll.checked = all.every((element) => element.checked);
+  selectAll.indeterminate = selectedCount > 0 && selectedCount < total;
+  selectAll.checked = selectedCount === total;
 }
 
 function showToast(message, type = "success", duration = 3000) {
@@ -898,7 +928,7 @@ window.downloadLog = downloadLog;
 window.clearLog = clearLog;
 window.logout = logout;
 window.toggleAll = toggleAll;
-window.syncSelectAll = syncSelectAll;
+window.toggleRowSelection = toggleRowSelection;
 window.goCredPage = goCredPage;
 window.switchTab = switchTab;
 
