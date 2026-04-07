@@ -1,4 +1,4 @@
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -285,10 +285,6 @@ impl BackupCoordinator {
                 created_at,
             )?;
         }
-        archive_file
-            .as_file_mut()
-            .flush()
-            .context("failed to flush temporary snapshot archive")?;
         archive_file
             .as_file_mut()
             .sync_all()

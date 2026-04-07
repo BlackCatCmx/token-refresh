@@ -49,17 +49,6 @@ impl S3CompatibleClient {
         })
     }
 
-    pub async fn put_object(&self, key: &str, bytes: &[u8]) -> Result<()> {
-        let object_path = object_path(key);
-        let response = self
-            .bucket
-            .put_object(object_path, bytes)
-            .await
-            .context("failed to upload backup object")?;
-        ensure_status(response.status_code(), &[200, 201], "上传备份")?;
-        Ok(())
-    }
-
     pub async fn put_object_stream<R: AsyncRead + Unpin + ?Sized>(
         &self,
         key: &str,
