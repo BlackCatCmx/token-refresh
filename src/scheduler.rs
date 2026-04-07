@@ -63,17 +63,11 @@ struct SchedulerStateStore {
 
 impl SchedulerStateStore {
     fn load(path: PathBuf) -> Result<Self> {
-        let state = if path.exists() {
-            let raw = std::fs::read(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            if raw.is_empty() {
-                SchedulerPersistedState::default()
-            } else {
-                serde_json::from_slice::<SchedulerPersistedState>(&raw)
-                    .with_context(|| format!("invalid scheduler state file {}", path.display()))?
-            }
-        } else {
-            SchedulerPersistedState::default()
+        let state = match fsutil::read_file_if_exists(&path)? {
+            Some(raw) if raw.is_empty() => SchedulerPersistedState::default(),
+            Some(raw) => serde_json::from_slice::<SchedulerPersistedState>(&raw)
+                .with_context(|| format!("invalid scheduler state file {}", path.display()))?,
+            None => SchedulerPersistedState::default(),
         };
         Ok(Self {
             path,
