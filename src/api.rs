@@ -983,9 +983,19 @@ async fn update_settings(
                 })
                 .into_response()
             }
-            Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+            Err(err) => {
+                let _ = state
+                    .logger
+                    .runtime("error", format!("settings update apply failed: {err:#}"));
+                json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string())
+            }
         },
-        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+        Err(err) => {
+            let _ = state
+                .logger
+                .runtime("warn", format!("settings update rejected: {err:#}"));
+            json_error(StatusCode::BAD_REQUEST, &err.to_string())
+        }
     }
 }
 

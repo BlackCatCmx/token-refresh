@@ -309,68 +309,72 @@ async function triggerManualRefreshAll() {
 }
 
 async function saveSettings() {
-  const payload = {
-    log_level: document.getElementById("log-level").value,
-    logging: { max_file_size: document.getElementById("max-file-size").value },
-    request_identity: {
-      originator: document.getElementById("originator").value,
-      user_agent_mode: document.getElementById("user-agent-mode").value,
-      user_agent: document.getElementById("user-agent").value,
-      user_agent_rules: {
-        versions: document.getElementById("user-agent-versions").value,
-        profiles: document.getElementById("user-agent-profiles").value,
-        terminals: document.getElementById("user-agent-terminals").value,
+  try {
+    const payload = {
+      log_level: document.getElementById("log-level").value,
+      logging: { max_file_size: document.getElementById("max-file-size").value },
+      request_identity: {
+        originator: document.getElementById("originator").value,
+        user_agent_mode: document.getElementById("user-agent-mode").value,
+        user_agent: document.getElementById("user-agent").value,
+        user_agent_rules: {
+          versions: document.getElementById("user-agent-versions").value,
+          profiles: document.getElementById("user-agent-profiles").value,
+          terminals: document.getElementById("user-agent-terminals").value,
+        },
       },
-    },
-    proxy: {
-      mode: document.getElementById("proxy-mode").value,
-      list: document.getElementById("proxy-list").value,
-    },
-    credential_management: {
-      abnormal_threshold: Number(document.getElementById("abnormal-threshold").value),
-      credential_page_size: normalizeCredentialPageSize(document.getElementById("credential-page-size").value),
-    },
-    refresh: {
-      interval: document.getElementById("refresh-interval").value,
-      lead_time: document.getElementById("lead-time").value,
-      inter_refresh_delay_min: document.getElementById("auto-delay-min").value,
-      inter_refresh_delay_max: document.getElementById("auto-delay-max").value,
-      manual_inter_refresh_delay_min: document.getElementById("manual-delay-min").value,
-      manual_inter_refresh_delay_max: document.getElementById("manual-delay-max").value,
-      failure_backoff: document.getElementById("failure-backoff").value,
-    },
-    network: {
-      timeout: document.getElementById("network-timeout").value,
-    },
-    backup: {
-      enabled: document.getElementById("backup-enabled").value === "true",
-      remote: {
-        type: document.getElementById("backup-remote-type").value,
-        endpoint: document.getElementById("backup-endpoint").value,
-        region: document.getElementById("backup-region").value.trim(),
-        bucket: document.getElementById("backup-bucket").value,
-        object_prefix: document.getElementById("backup-prefix").value.trim(),
-        access_key_id: document.getElementById("backup-access-key-id").value,
-        secret_access_key: document.getElementById("backup-secret-access-key").value,
-        path_style: document.getElementById("backup-path-style").value === "true",
+      proxy: {
+        mode: document.getElementById("proxy-mode").value,
+        list: document.getElementById("proxy-list").value,
       },
-      schedule: {
-        daily_utc_enabled: document.getElementById("backup-daily-enabled").value === "true",
-        after_refresh_enabled: document.getElementById("backup-after-refresh-enabled").value === "true",
-        after_refresh_debounce: document.getElementById("backup-after-refresh-debounce").value,
-        min_interval_between_auto_backups: document.getElementById("backup-min-auto-interval").value,
+      credential_management: {
+        abnormal_threshold: Number(document.getElementById("abnormal-threshold").value),
+        credential_page_size: normalizeCredentialPageSize(document.getElementById("credential-page-size").value),
       },
-    },
-  };
-  await api("api/settings", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  await loadSettings(true);
-  await loadBackupStatus();
-  await loadScheduler();
-  alert("设置已保存");
+      refresh: {
+        interval: document.getElementById("refresh-interval").value,
+        lead_time: document.getElementById("lead-time").value,
+        inter_refresh_delay_min: document.getElementById("auto-delay-min").value,
+        inter_refresh_delay_max: document.getElementById("auto-delay-max").value,
+        manual_inter_refresh_delay_min: document.getElementById("manual-delay-min").value,
+        manual_inter_refresh_delay_max: document.getElementById("manual-delay-max").value,
+        failure_backoff: document.getElementById("failure-backoff").value,
+      },
+      network: {
+        timeout: document.getElementById("network-timeout").value,
+      },
+      backup: {
+        enabled: document.getElementById("backup-enabled").value === "true",
+        remote: {
+          type: document.getElementById("backup-remote-type").value,
+          endpoint: document.getElementById("backup-endpoint").value,
+          region: document.getElementById("backup-region").value.trim(),
+          bucket: document.getElementById("backup-bucket").value,
+          object_prefix: document.getElementById("backup-prefix").value.trim(),
+          access_key_id: document.getElementById("backup-access-key-id").value,
+          secret_access_key: document.getElementById("backup-secret-access-key").value,
+          path_style: document.getElementById("backup-path-style").value === "true",
+        },
+        schedule: {
+          daily_utc_enabled: document.getElementById("backup-daily-enabled").value === "true",
+          after_refresh_enabled: document.getElementById("backup-after-refresh-enabled").value === "true",
+          after_refresh_debounce: document.getElementById("backup-after-refresh-debounce").value,
+          min_interval_between_auto_backups: document.getElementById("backup-min-auto-interval").value,
+        },
+      },
+    };
+    await api("api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    await loadSettings(true);
+    await loadBackupStatus();
+    await loadScheduler();
+    alert("设置已保存");
+  } catch (error) {
+    alert(error.message);
+  }
 }
 
 async function loadCredentials(zone) {
