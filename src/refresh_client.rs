@@ -17,6 +17,13 @@ pub struct RefreshClient {
     clients: Mutex<HashMap<ClientKey, reqwest::Client>>,
 }
 
+#[derive(Clone, Debug)]
+enum ProxyDirective {
+    UseConfig,
+    ForceNone,
+    Force(String),
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ClientKey {
     timeout: Duration,
@@ -37,15 +44,56 @@ impl RefreshClient {
         }
     }
 
+    pub(crate) fn reserve_proxy_index_from_list(
+        &self,
+        mode: &str,
+        proxies: &[String],
+    ) -> Result<Option<usize>> {
+        self.proxy_selector
+            .reserve_proxy_index_from_list(mode, proxies)
+    }
+
     pub async fn refresh(
         &self,
         config: &AppConfig,
         refresh_token: &str,
         user_agent: &str,
     ) -> std::result::Result<RefreshResponsePayload, RefreshFailure> {
-        let client = self
-            .client_for(config)
+        self.refresh_with_proxy_directive(
+            config,
+            refresh_token,
+            user_agent,
+            ProxyDirective::UseConfig,
+        )
+        .await
+    }
+
+    pub(crate) async fn refresh_with_proxy(
+        &self,
+        config: &AppConfig,
+        refresh_token: &str,
+        user_agent: &str,
+        proxy: Option<&str>,
+    ) -> std::result::Result<RefreshResponsePayload, RefreshFailure> {
+        let directive = match proxy {
+            Some(value) => ProxyDirective::Force(value.to_string()),
+            None => ProxyDirective::ForceNone,
+        };
+        self.refresh_with_proxy_directive(config, refresh_token, user_agent, directive)
+            .await
+    }
+
+    async fn refresh_with_proxy_directive(
+        &self,
+        config: &AppConfig,
+        refresh_token: &str,
+        user_agent: &str,
+        directive: ProxyDirective,
+    ) -> std::result::Result<RefreshResponsePayload, RefreshFailure> {
+        let (client, proxy_used) = self
+            .client_for(config, directive)
             .map_err(|err| RefreshFailure::transient("client_build_failed", err.to_string()))?;
+        let proxy_host = proxy_used.as_deref().and_then(proxy_host_label);
         let mut headers = HeaderMap::new();
         headers.insert(
             "originator",
@@ -69,22 +117,32 @@ impl RefreshClient {
             })
             .send()
             .await
-            .map_err(classify_transport_error)?;
+            .map_err(|err| classify_transport_error(err, proxy_host.clone()))?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|err| RefreshFailure::transient("response_read_failed", err.to_string()))?;
+        let body = response.text().await.map_err(|err| {
+            RefreshFailure::transient("response_read_failed", err.to_string())
+                .with_proxy_host(proxy_host.clone())
+        })?;
         if !status.is_success() {
-            return Err(classify_http_error(status.as_u16(), &body));
+            return Err(classify_http_error(status.as_u16(), &body).with_proxy_host(proxy_host));
         }
-        serde_json::from_str::<RefreshResponsePayload>(&body)
-            .map_err(|err| RefreshFailure::transient("invalid_refresh_response", err.to_string()))
+        serde_json::from_str::<RefreshResponsePayload>(&body).map_err(|err| {
+            RefreshFailure::transient("invalid_refresh_response", err.to_string())
+                .with_proxy_host(proxy_host)
+        })
     }
 
-    fn client_for(&self, config: &AppConfig) -> Result<reqwest::Client> {
+    fn client_for(
+        &self,
+        config: &AppConfig,
+        directive: ProxyDirective,
+    ) -> Result<(reqwest::Client, Option<String>)> {
         let timeout = parse_duration_str(&config.network.timeout)?;
-        let proxy = self.proxy_selector.select_proxy(&config.proxy)?;
+        let proxy = match directive {
+            ProxyDirective::UseConfig => self.proxy_selector.select_proxy(&config.proxy)?,
+            ProxyDirective::ForceNone => None,
+            ProxyDirective::Force(value) => Some(value),
+        };
         let key = ClientKey {
             timeout,
             proxy: proxy.clone(),
@@ -95,19 +153,21 @@ impl RefreshClient {
             .lock()
             .map_err(|_| anyhow::anyhow!("refresh client cache lock poisoned"))?;
         if let Some(existing) = guard.get(&key) {
-            return Ok(existing.clone());
+            return Ok((existing.clone(), proxy));
         }
 
         let mut builder = reqwest::Client::builder().timeout(timeout);
-        if let Some(proxy) = proxy {
+        if let Some(proxy) = proxy.clone() {
             builder = builder.proxy(
                 reqwest::Proxy::all(&proxy)
                     .with_context(|| format!("invalid proxy configuration: {proxy}"))?,
             );
+        } else {
+            builder = builder.no_proxy();
         }
         let client = builder.build().context("failed to build HTTP client")?;
         guard.insert(key, client.clone());
-        Ok(client)
+        Ok((client, proxy))
     }
 }
 
@@ -151,6 +211,7 @@ pub struct RefreshFailure {
     pub code: String,
     pub reason: String,
     pub count_towards_abnormal: bool,
+    pub proxy_host: Option<String>,
 }
 
 impl RefreshFailure {
@@ -159,6 +220,7 @@ impl RefreshFailure {
             code: code.into(),
             reason: reason.into(),
             count_towards_abnormal: false,
+            proxy_host: None,
         }
     }
 
@@ -167,18 +229,33 @@ impl RefreshFailure {
             code: code.into(),
             reason: reason.into(),
             count_towards_abnormal: true,
+            proxy_host: None,
         }
+    }
+
+    pub fn with_proxy_host(mut self, proxy_host: Option<String>) -> Self {
+        self.proxy_host = proxy_host;
+        self
     }
 }
 
-fn classify_transport_error(error: reqwest::Error) -> RefreshFailure {
+fn proxy_host_label(proxy: &str) -> Option<String> {
+    let url = reqwest::Url::parse(proxy).ok()?;
+    let host = url.host_str()?;
+    let port = url.port()?;
+    Some(format!("{host}:{port}"))
+}
+
+fn classify_transport_error(error: reqwest::Error, proxy_host: Option<String>) -> RefreshFailure {
     if error.is_timeout() {
-        return RefreshFailure::transient("network_timeout", error.to_string());
+        return RefreshFailure::transient("network_timeout", error.to_string())
+            .with_proxy_host(proxy_host);
     }
     if error.is_connect() {
-        return RefreshFailure::transient("network_connect_failed", error.to_string());
+        return RefreshFailure::transient("network_connect_failed", error.to_string())
+            .with_proxy_host(proxy_host);
     }
-    RefreshFailure::transient("network_error", error.to_string())
+    RefreshFailure::transient("network_error", error.to_string()).with_proxy_host(proxy_host)
 }
 
 fn classify_http_error(status: u16, body: &str) -> RefreshFailure {
@@ -215,4 +292,97 @@ fn find_known_error_code(body: &str) -> Option<String> {
     .into_iter()
     .find(|needle| body.contains(needle))
     .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+
+    fn proxy_env_lock() -> &'static StdMutex<()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    struct EnvGuard {
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<String>)]) -> Self {
+            let mut values = Vec::with_capacity(vars.len());
+            for (key, value) in vars {
+                values.push((*key, env::var(key).ok()));
+                match value {
+                    Some(value) => unsafe { env::set_var(key, value) },
+                    None => unsafe { env::remove_var(key) },
+                }
+            }
+            Self { values }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.values.drain(..).rev() {
+                match value {
+                    Some(value) => unsafe { env::set_var(key, value) },
+                    None => unsafe { env::remove_var(key) },
+                }
+            }
+        }
+    }
+
+    fn test_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.network.timeout = "100ms".to_string();
+        config.proxy.mode = "fixed".to_string();
+        config.proxy.list = String::new();
+        config
+    }
+
+    async fn request_uses_proxy(config: &AppConfig, directive: ProxyDirective) -> bool {
+        let _env_lock = proxy_env_lock().lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+        let _env_guard = EnvGuard::set(&[
+            ("HTTPS_PROXY", Some(proxy_url)),
+            ("https_proxy", None),
+            ("ALL_PROXY", None),
+            ("all_proxy", None),
+            ("NO_PROXY", None),
+            ("no_proxy", None),
+        ]);
+        let client = RefreshClient::new()
+            .client_for(config, directive)
+            .unwrap()
+            .0;
+
+        let request = async move {
+            let _ = client.get("https://example.invalid/").send().await;
+        };
+        let accept = async move {
+            timeout(Duration::from_millis(250), listener.accept())
+                .await
+                .is_ok()
+        };
+        let (_, reached_proxy) = tokio::join!(request, accept);
+        reached_proxy
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_proxy_config_disables_system_proxy() {
+        let config = test_config();
+        assert!(!request_uses_proxy(&config, ProxyDirective::UseConfig).await);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn force_none_disables_system_proxy() {
+        let config = test_config();
+        assert!(!request_uses_proxy(&config, ProxyDirective::ForceNone).await);
+    }
 }

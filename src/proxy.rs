@@ -25,11 +25,19 @@ impl ProxySelector {
 
     pub fn select_proxy(&self, config: &ProxyConfig) -> Result<Option<String>> {
         let proxies = validate_proxy_list(&config.list)?;
+        self.select_proxy_from_list(config.mode.trim(), &proxies)
+    }
+
+    pub fn reserve_proxy_index_from_list(
+        &self,
+        mode: &str,
+        proxies: &[String],
+    ) -> Result<Option<usize>> {
         if proxies.is_empty() {
             return Ok(None);
         }
-        match config.mode.trim() {
-            "fixed" => Ok(proxies.first().cloned()),
+        match mode {
+            "fixed" => Ok(Some(0)),
             "round_robin" => {
                 let mut guard = self
                     .next_index
@@ -37,10 +45,15 @@ impl ProxySelector {
                     .map_err(|_| anyhow::anyhow!("proxy selector lock poisoned"))?;
                 let index = *guard % proxies.len();
                 *guard = (*guard + 1) % proxies.len();
-                Ok(proxies.get(index).cloned())
+                Ok(Some(index))
             }
             other => bail!("unsupported proxy mode: {other}"),
         }
+    }
+
+    pub fn select_proxy_from_list(&self, mode: &str, proxies: &[String]) -> Result<Option<String>> {
+        let index = self.reserve_proxy_index_from_list(mode, proxies)?;
+        Ok(index.and_then(|value| proxies.get(value).cloned()))
     }
 }
 
@@ -99,6 +112,33 @@ mod tests {
         assert_eq!(
             selector.select_proxy(&config).unwrap(),
             Some("socks5://127.0.0.1:10808".to_string())
+        );
+    }
+
+    #[test]
+    fn reserve_proxy_index_cycles_through_entries() {
+        let selector = ProxySelector::new();
+        let proxies = vec![
+            "socks5://127.0.0.1:10808".to_string(),
+            "socks5://127.0.0.1:10809".to_string(),
+        ];
+        assert_eq!(
+            selector
+                .reserve_proxy_index_from_list("round_robin", &proxies)
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            selector
+                .reserve_proxy_index_from_list("round_robin", &proxies)
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            selector
+                .reserve_proxy_index_from_list("round_robin", &proxies)
+                .unwrap(),
+            Some(0)
         );
     }
 }

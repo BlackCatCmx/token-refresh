@@ -151,11 +151,15 @@ impl RefreshTransaction {
                 }
             };
 
-        match self
-            .client
-            .refresh(config, credential.refresh_token.trim(), &request_user_agent)
-            .await
-        {
+        let refresh_result = self
+            .refresh_with_proxy_fallback(
+                config,
+                credential.refresh_token.trim(),
+                &request_user_agent,
+                key,
+            )
+            .await?;
+        match refresh_result {
             Ok(payload) => {
                 self.handle_success(
                     config,
@@ -231,6 +235,105 @@ impl RefreshTransaction {
             message: "refresh succeeded".to_string(),
             failure_code: None,
         })
+    }
+
+    async fn refresh_with_proxy_fallback(
+        &self,
+        config: &AppConfig,
+        refresh_token: &str,
+        user_agent: &str,
+        key: &str,
+    ) -> Result<std::result::Result<RefreshResponsePayload, RefreshFailure>> {
+        let proxies = match crate::proxy::validate_proxy_list(&config.proxy.list) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(Err(RefreshFailure::transient(
+                    "invalid_proxy_list",
+                    err.to_string(),
+                )));
+            }
+        };
+        let proxy_count = proxies.len();
+        if proxy_count == 0 {
+            return Ok(self
+                .client
+                .refresh_with_proxy(config, refresh_token, user_agent, None)
+                .await);
+        }
+
+        let mode = config.proxy.mode.trim();
+        match mode {
+            "fixed" => {
+                let proxy = proxies[0].clone();
+                let first_attempt = self
+                    .client
+                    .refresh_with_proxy(config, refresh_token, user_agent, Some(&proxy))
+                    .await;
+                match first_attempt {
+                    Ok(payload) => Ok(Ok(payload)),
+                    Err(error) if should_fallback_due_to_proxy_connect(&error) => {
+                        let proxy_host =
+                            error.proxy_host.clone().unwrap_or_else(|| "-".to_string());
+                        runtime_warn_best_effort(
+                            self.logger.as_ref(),
+                            format!(
+                                "代理连接失败，回退到直连 (key={}, proxy={})",
+                                key, proxy_host
+                            ),
+                        );
+                        Ok(self
+                            .client
+                            .refresh_with_proxy(config, refresh_token, user_agent, None)
+                            .await)
+                    }
+                    Err(error) => Ok(Err(error)),
+                }
+            }
+            "round_robin" => {
+                let start_index = self
+                    .client
+                    .reserve_proxy_index_from_list(mode, &proxies)?
+                    .expect("invariant: proxy_count > 0");
+                for attempt in 0..proxy_count {
+                    let proxy = proxies[(start_index + attempt) % proxy_count].clone();
+                    let attempt_result = self
+                        .client
+                        .refresh_with_proxy(config, refresh_token, user_agent, Some(&proxy))
+                        .await;
+                    match attempt_result {
+                        Ok(payload) => return Ok(Ok(payload)),
+                        Err(error) if should_fallback_due_to_proxy_connect(&error) => {
+                            let proxy_host =
+                                error.proxy_host.clone().unwrap_or_else(|| "-".to_string());
+                            if attempt + 1 < proxy_count {
+                                runtime_warn_best_effort(
+                                    self.logger.as_ref(),
+                                    format!(
+                                        "代理连接失败，切换下一条代理 (key={}, proxy={})",
+                                        key, proxy_host
+                                    ),
+                                );
+                                continue;
+                            }
+                            runtime_warn_best_effort(
+                                self.logger.as_ref(),
+                                format!(
+                                    "全部代理连接失败，回退到直连 (key={}, last_proxy={})",
+                                    key, proxy_host
+                                ),
+                            );
+                            break;
+                        }
+                        Err(error) => return Ok(Err(error)),
+                    }
+                }
+                Ok(self
+                    .client
+                    .refresh_with_proxy(config, refresh_token, user_agent, None)
+                    .await)
+            }
+            _ => Ok(self.client.refresh(config, refresh_token, user_agent).await),
+        }
     }
 
     async fn handle_failure(
@@ -323,6 +426,14 @@ impl RefreshTransaction {
             failure_code: Some(error.code),
         })
     }
+}
+
+fn should_fallback_due_to_proxy_connect(error: &RefreshFailure) -> bool {
+    error.code == "network_connect_failed" && error.proxy_host.is_some()
+}
+
+fn runtime_warn_best_effort(logger: &LogManager, message: impl AsRef<str>) {
+    let _ = logger.runtime("warn", message);
 }
 
 fn merge_refresh_response(
@@ -478,5 +589,16 @@ mod tests {
         let due = due_at(&config, &credential, now).unwrap().unwrap();
 
         assert!(due <= now);
+    }
+
+    #[test]
+    fn runtime_warn_best_effort_ignores_logging_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let logger = LogManager::new(temp.path(), 1024, "info").unwrap();
+        let runtime_log = temp.path().join("logs/runtime.log");
+        std::fs::remove_file(&runtime_log).unwrap();
+        std::fs::create_dir(&runtime_log).unwrap();
+
+        runtime_warn_best_effort(&logger, "proxy fallback warning");
     }
 }
