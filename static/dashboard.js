@@ -177,7 +177,7 @@ function shortTime(rfc3339) {
 }
 
 async function schedulerAction(action) {
-  await api(`/api/scheduler/${action}`, { method: "POST" });
+  await api(`api/scheduler/${action}`, { method: "POST" });
   await loadScheduler();
 }
 

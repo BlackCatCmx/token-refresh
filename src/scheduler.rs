@@ -394,9 +394,17 @@ impl SchedulerRuntime {
                 parse_duration_str(&config.refresh.inter_refresh_delay_min)?,
                 parse_duration_str(&config.refresh.inter_refresh_delay_max)?,
             );
+            let mut wake_requested = false;
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = self.notify.notified() => {}
+                _ = self.notify.notified() => {
+                    wake_requested = true;
+                }
+            }
+            if wake_requested {
+                // Re-run planning with the latest config/state instead of continuing
+                // a batch that was computed before the wake-up event.
+                return Ok(());
             }
         }
         Ok(())
