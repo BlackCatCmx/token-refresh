@@ -17,7 +17,7 @@ use crate::credential::parse_rfc3339;
 use crate::credential_store::{CredentialStore, CredentialZone};
 use crate::fsutil;
 use crate::logging::LogManager;
-use crate::status::{CredentialStatusRecord, CredentialStatusStore, normalize_status_key};
+use crate::status::{CredentialStatusRecord, CredentialStatusStore};
 use crate::transaction::{RefreshOutcome, RefreshTransaction, due_at};
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -305,7 +305,6 @@ impl SchedulerRuntime {
         let config = self.config_manager.effective_config().await;
         let now = Utc::now();
         let entries = self.store.scan_zone(CredentialZone::Normal)?;
-        let statuses = self.status_store.all()?;
         let mut due_entries = Vec::new();
         let mut next_wake_at: Option<DateTime<Utc>> = None;
         let backoff_map = self.backoff_until.read().await.clone();
@@ -316,8 +315,8 @@ impl SchedulerRuntime {
             } else {
                 now
             };
-            let persisted_backoff =
-                persisted_backoff_until(&config, statuses.get(&normalize_status_key(&key)))?;
+            let persisted_status = self.status_store.get(&key)?;
+            let persisted_backoff = persisted_backoff_until(&config, persisted_status.as_ref())?;
             let scheduled_time = persisted_backoff
                 .into_iter()
                 .chain(backoff_map.get(&key).copied())

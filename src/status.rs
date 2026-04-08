@@ -65,7 +65,7 @@ impl CredentialStatusStore {
             .records
             .lock()
             .map_err(|_| anyhow::anyhow!("status store lock poisoned"))?;
-        Ok(guard.get(key).cloned())
+        Ok(guard.get(&normalize_status_key(key)).cloned())
     }
 
     pub fn record_failure(

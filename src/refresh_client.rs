@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -8,9 +12,15 @@ use crate::proxy::ProxySelector;
 pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
-#[derive(Debug)]
 pub struct RefreshClient {
     proxy_selector: ProxySelector,
+    clients: Mutex<HashMap<ClientKey, reqwest::Client>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ClientKey {
+    timeout: Duration,
+    proxy: Option<String>,
 }
 
 impl Default for RefreshClient {
@@ -23,6 +33,7 @@ impl RefreshClient {
     pub fn new() -> Self {
         Self {
             proxy_selector: ProxySelector::new(),
+            clients: Mutex::new(HashMap::new()),
         }
     }
 
@@ -33,7 +44,7 @@ impl RefreshClient {
         user_agent: &str,
     ) -> std::result::Result<RefreshResponsePayload, RefreshFailure> {
         let client = self
-            .build_client(config)
+            .client_for(config)
             .map_err(|err| RefreshFailure::transient("client_build_failed", err.to_string()))?;
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -71,16 +82,41 @@ impl RefreshClient {
             .map_err(|err| RefreshFailure::transient("invalid_refresh_response", err.to_string()))
     }
 
-    fn build_client(&self, config: &AppConfig) -> Result<reqwest::Client> {
-        let mut builder =
-            reqwest::Client::builder().timeout(parse_duration_str(&config.network.timeout)?);
-        if let Some(proxy) = self.proxy_selector.select_proxy(&config.proxy)? {
+    fn client_for(&self, config: &AppConfig) -> Result<reqwest::Client> {
+        let timeout = parse_duration_str(&config.network.timeout)?;
+        let proxy = self.proxy_selector.select_proxy(&config.proxy)?;
+        let key = ClientKey {
+            timeout,
+            proxy: proxy.clone(),
+        };
+
+        let mut guard = self
+            .clients
+            .lock()
+            .map_err(|_| anyhow::anyhow!("refresh client cache lock poisoned"))?;
+        if let Some(existing) = guard.get(&key) {
+            return Ok(existing.clone());
+        }
+
+        let mut builder = reqwest::Client::builder().timeout(timeout);
+        if let Some(proxy) = proxy {
             builder = builder.proxy(
                 reqwest::Proxy::all(&proxy)
                     .with_context(|| format!("invalid proxy configuration: {proxy}"))?,
             );
         }
-        builder.build().context("failed to build HTTP client")
+        let client = builder.build().context("failed to build HTTP client")?;
+        guard.insert(key, client.clone());
+        Ok(client)
+    }
+}
+
+impl std::fmt::Debug for RefreshClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keep Debug output stable and avoid dumping internal reqwest client details.
+        f.debug_struct("RefreshClient")
+            .field("proxy_selector", &self.proxy_selector)
+            .finish_non_exhaustive()
     }
 }
 
