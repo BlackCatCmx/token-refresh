@@ -1,7 +1,8 @@
 use std::io::{Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{fmt, fmt::Formatter};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -9,7 +10,7 @@ use tempfile::Builder;
 use tokio::sync::{Notify, RwLock};
 
 use crate::backup_archive::{self, RestoredSnapshot};
-use crate::config::{BackupConfig, ConfigManager, parse_duration_str};
+use crate::config::{BackupConfig, BackupRemoteConfig, ConfigManager, parse_duration_str};
 use crate::credential_store::CredentialStore;
 use crate::logging::LogManager;
 use crate::s3_compatible::{RemoteSnapshot, S3CompatibleClient};
@@ -56,7 +57,56 @@ struct BackupRuntime {
     dirty_since: RwLock<Option<DateTime<Utc>>>,
     last_auto_backup_at: RwLock<Option<DateTime<Utc>>>,
     last_daily_backup_for: RwLock<Option<NaiveDate>>,
+    s3_client: RwLock<Option<CachedS3Client>>,
     busy: AtomicBool,
+}
+
+#[derive(Clone)]
+struct CachedS3Client {
+    key: BackupRemoteCacheKey,
+    client: Arc<S3CompatibleClient>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct BackupRemoteCacheKey {
+    kind: String,
+    endpoint: String,
+    region: String,
+    bucket: String,
+    object_prefix: String,
+    access_key_id: String,
+    secret_access_key: String,
+    path_style: bool,
+}
+
+impl fmt::Debug for BackupRemoteCacheKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BackupRemoteCacheKey")
+            .field("kind", &self.kind)
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("object_prefix", &self.object_prefix)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field("path_style", &self.path_style)
+            .finish()
+    }
+}
+
+impl BackupRemoteCacheKey {
+    fn from_remote_config(config: &BackupRemoteConfig) -> Self {
+        Self {
+            kind: config.kind.trim().to_string(),
+            endpoint: config.endpoint.trim().trim_end_matches('/').to_string(),
+            region: config.region.trim().to_string(),
+            bucket: config.bucket.trim().to_string(),
+            object_prefix: config.object_prefix.trim().trim_matches('/').to_string(),
+            access_key_id: config.access_key_id.trim().to_string(),
+            secret_access_key: config.secret_access_key.trim().to_string(),
+            path_style: config.path_style,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +124,29 @@ impl BackupTrigger {
             Self::Manual => "manual",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum S3ClientCacheStatus {
+    Hit,
+    Created,
+    Refreshed,
+}
+
+impl S3ClientCacheStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Created => "created",
+            Self::Refreshed => "refreshed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SnapshotTrimSummary {
+    listed_count: usize,
+    deleted_count: usize,
 }
 
 impl BackupCoordinator {
@@ -98,6 +171,7 @@ impl BackupCoordinator {
                 dirty_since: RwLock::new(None),
                 last_auto_backup_at: RwLock::new(None),
                 last_daily_backup_for: RwLock::new(None),
+                s3_client: RwLock::new(None),
                 busy: AtomicBool::new(false),
             }),
         }
@@ -141,10 +215,41 @@ impl BackupCoordinator {
     }
 
     pub async fn list_snapshots(&self) -> Result<Vec<RemoteSnapshot>> {
+        let started_at = Instant::now();
+        let rss_before_kb = process_rss_kb();
         let config = self.inner.config_manager.effective_config().await;
         let backup = ensure_backup_ready(&config.backup)?;
-        let client = S3CompatibleClient::new(&backup.remote)?;
-        client.list_snapshots().await
+        let (client, cache_status) = self.cached_s3_client(&backup.remote).await?;
+        let result = client.list_snapshots().await;
+        let rss_after_kb = process_rss_kb();
+        match &result {
+            Ok(items) => {
+                let _ = self.inner.logger.runtime(
+                    "info",
+                    format!(
+                        "backup snapshots listed count={} cache={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                        items.len(),
+                        cache_status.as_str(),
+                        format_optional_u64(rss_before_kb),
+                        format_optional_u64(rss_after_kb),
+                        started_at.elapsed().as_millis(),
+                    ),
+                );
+            }
+            Err(err) => {
+                let _ = self.inner.logger.runtime(
+                    "error",
+                    format!(
+                        "backup snapshots listing failed cache={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                        cache_status.as_str(),
+                        format_optional_u64(rss_before_kb),
+                        format_optional_u64(rss_after_kb),
+                        started_at.elapsed().as_millis(),
+                    ),
+                );
+            }
+        }
+        result
     }
 
     pub async fn restore_snapshot(&self, snapshot_key: &str) -> Result<RestoreResult> {
@@ -262,122 +367,257 @@ impl BackupCoordinator {
     }
 
     async fn run_backup_once(&self, trigger: BackupTrigger) -> Result<RemoteSnapshot> {
-        let config = self.inner.config_manager.effective_config().await;
-        let backup = ensure_backup_ready(&config.backup)?;
-        let client = S3CompatibleClient::new(&backup.remote)?;
-        let created_at = Utc::now();
-        let snapshot_key = build_snapshot_key(&client, trigger, created_at);
-        let temp_dir = config.state_dir.join("tmp");
-        std::fs::create_dir_all(&temp_dir)
-            .with_context(|| format!("failed to create {}", temp_dir.display()))?;
-        let mut archive_file = Builder::new()
-            .prefix("snapshot-")
-            .suffix(".zip")
-            .tempfile_in(&temp_dir)
-            .with_context(|| format!("failed to create temp snapshot in {}", temp_dir.display()))?;
-        {
-            let _guard = self.inner.write_coordinator.lock_commit().await;
-            backup_archive::build_snapshot_archive_to_writer(
-                archive_file.as_file_mut(),
-                &self.inner.store,
-                &self.inner.status_store,
-                trigger.as_str(),
-                created_at,
-            )?;
-        }
-        archive_file
-            .as_file_mut()
-            .sync_all()
-            .context("failed to sync temporary snapshot archive")?;
-        let archive_size = archive_file
-            .as_file()
-            .metadata()
-            .context("failed to inspect temporary snapshot archive")?
-            .len();
-        let mut upload_handle = archive_file
-            .reopen()
-            .context("failed to reopen temporary snapshot archive")?;
-        upload_handle
-            .seek(SeekFrom::Start(0))
-            .context("failed to rewind temporary snapshot archive")?;
-        let mut upload_file = tokio::fs::File::from_std(upload_handle);
-        client
-            .put_object_stream(&snapshot_key, &mut upload_file)
-            .await?;
-        trim_old_snapshots(&client).await?;
-        {
-            let mut status = self.inner.status.write().await;
-            status.last_success_at = Some(created_at.to_rfc3339());
-            status.last_snapshot_key = Some(snapshot_key.clone());
-            status.last_error = None;
-            status.dirty_pending = false;
-            status.next_after_refresh_at = None;
-        }
-        {
-            let mut dirty_since = self.inner.dirty_since.write().await;
-            *dirty_since = None;
-        }
-        if matches!(trigger, BackupTrigger::Daily | BackupTrigger::AfterRefresh) {
-            let mut last_auto = self.inner.last_auto_backup_at.write().await;
-            *last_auto = Some(created_at);
-        }
-        if matches!(trigger, BackupTrigger::Daily) {
-            let mut last_daily = self.inner.last_daily_backup_for.write().await;
-            *last_daily = Some(created_at.date_naive());
-        }
-        self.inner.logger.runtime(
+        let started_at = Instant::now();
+        let rss_before_kb = process_rss_kb();
+        let dirty_since = *self.inner.dirty_since.read().await;
+        let last_auto_backup_at = *self.inner.last_auto_backup_at.read().await;
+        let _ = self.inner.logger.runtime(
             "info",
             format!(
-                "backup uploaded successfully trigger={} key={}",
+                "backup started trigger={} rss_before_kb={} dirty_since={} last_auto_backup_at={}",
                 trigger.as_str(),
-                snapshot_key
+                format_optional_u64(rss_before_kb),
+                format_optional_datetime(dirty_since),
+                format_optional_datetime(last_auto_backup_at),
             ),
-        )?;
-        let (created_at_display, trigger_display) =
-            crate::s3_compatible::parse_snapshot_name_for_display(&snapshot_key);
-        Ok(RemoteSnapshot {
-            key: snapshot_key,
-            size: archive_size,
-            last_modified: Some(created_at.to_rfc3339()),
-            created_at: created_at_display,
-            trigger: trigger_display,
-        })
+        );
+
+        let mut cache_status = None;
+        let mut snapshot_key_for_log: Option<String> = None;
+        let mut archive_size_bytes = None;
+        let mut rss_after_archive_kb = None;
+        let mut rss_after_upload_kb = None;
+        let mut build_elapsed_ms = None;
+        let mut upload_trim_elapsed_ms = None;
+        let mut trim_summary = SnapshotTrimSummary::default();
+
+        let result = async {
+            let config = self.inner.config_manager.effective_config().await;
+            let backup = ensure_backup_ready(&config.backup)?;
+            let (client, status) = self.cached_s3_client(&backup.remote).await?;
+            cache_status = Some(status);
+            let created_at = Utc::now();
+            let snapshot_key = build_snapshot_key(&client, trigger, created_at);
+            snapshot_key_for_log = Some(snapshot_key.clone());
+            let temp_dir = config.state_dir.join("tmp");
+            std::fs::create_dir_all(&temp_dir)
+                .with_context(|| format!("failed to create {}", temp_dir.display()))?;
+            let mut archive_file = Builder::new()
+                .prefix("snapshot-")
+                .suffix(".zip")
+                .tempfile_in(&temp_dir)
+                .with_context(|| {
+                    format!("failed to create temp snapshot in {}", temp_dir.display())
+                })?;
+            {
+                let _guard = self.inner.write_coordinator.lock_commit().await;
+                backup_archive::build_snapshot_archive_to_writer(
+                    archive_file.as_file_mut(),
+                    &self.inner.store,
+                    &self.inner.status_store,
+                    trigger.as_str(),
+                    created_at,
+                )?;
+            }
+            archive_file
+                .as_file_mut()
+                .sync_all()
+                .context("failed to sync temporary snapshot archive")?;
+            let archive_size = archive_file
+                .as_file()
+                .metadata()
+                .context("failed to inspect temporary snapshot archive")?
+                .len();
+            archive_size_bytes = Some(archive_size);
+            rss_after_archive_kb = process_rss_kb();
+            build_elapsed_ms = Some(started_at.elapsed().as_millis());
+
+            let upload_started_at = Instant::now();
+            let mut upload_handle = archive_file
+                .reopen()
+                .context("failed to reopen temporary snapshot archive")?;
+            upload_handle
+                .seek(SeekFrom::Start(0))
+                .context("failed to rewind temporary snapshot archive")?;
+            let mut upload_file = tokio::fs::File::from_std(upload_handle);
+            client
+                .put_object_stream(&snapshot_key, &mut upload_file)
+                .await?;
+            trim_summary = trim_old_snapshots(&client).await?;
+            rss_after_upload_kb = process_rss_kb();
+            upload_trim_elapsed_ms = Some(upload_started_at.elapsed().as_millis());
+            {
+                let mut status = self.inner.status.write().await;
+                status.last_success_at = Some(created_at.to_rfc3339());
+                status.last_snapshot_key = Some(snapshot_key.clone());
+                status.last_error = None;
+                status.dirty_pending = false;
+                status.next_after_refresh_at = None;
+            }
+            {
+                let mut dirty_since = self.inner.dirty_since.write().await;
+                *dirty_since = None;
+            }
+            if matches!(trigger, BackupTrigger::Daily | BackupTrigger::AfterRefresh) {
+                let mut last_auto = self.inner.last_auto_backup_at.write().await;
+                *last_auto = Some(created_at);
+            }
+            if matches!(trigger, BackupTrigger::Daily) {
+                let mut last_daily = self.inner.last_daily_backup_for.write().await;
+                *last_daily = Some(created_at.date_naive());
+            }
+            let (created_at_display, trigger_display) =
+                crate::s3_compatible::parse_snapshot_name_for_display(&snapshot_key);
+            Ok(RemoteSnapshot {
+                key: snapshot_key,
+                size: archive_size,
+                last_modified: Some(created_at.to_rfc3339()),
+                created_at: created_at_display,
+                trigger: trigger_display,
+            })
+        }
+        .await;
+
+        let rss_after_kb = process_rss_kb();
+        let cache_status = cache_status
+            .map(|value| value.as_str())
+            .unwrap_or("unknown");
+        let snapshot_key = snapshot_key_for_log.as_deref().unwrap_or("-");
+        let archive_size_bytes = archive_size_bytes
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "na".to_string());
+        let total_elapsed_ms = started_at.elapsed().as_millis();
+        match &result {
+            Ok(snapshot) => {
+                let _ = self.inner.logger.runtime(
+                    "info",
+                    format!(
+                        "backup finished trigger={} key={} cache={} rss_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} rss_after_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_trim_ms={} total_ms={}",
+                        trigger.as_str(),
+                        snapshot.key,
+                        cache_status,
+                        format_optional_u64(rss_before_kb),
+                        format_optional_u64(rss_after_archive_kb),
+                        format_optional_u64(rss_after_upload_kb),
+                        format_optional_u64(rss_after_kb),
+                        archive_size_bytes,
+                        trim_summary.listed_count,
+                        trim_summary.deleted_count,
+                        format_optional_u128(build_elapsed_ms),
+                        format_optional_u128(upload_trim_elapsed_ms),
+                        total_elapsed_ms,
+                    ),
+                );
+            }
+            Err(err) => {
+                let _ = self.inner.logger.runtime(
+                    "error",
+                    format!(
+                        "backup failed trigger={} key={} cache={} rss_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} rss_after_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_trim_ms={} total_ms={} err={err:#}",
+                        trigger.as_str(),
+                        snapshot_key,
+                        cache_status,
+                        format_optional_u64(rss_before_kb),
+                        format_optional_u64(rss_after_archive_kb),
+                        format_optional_u64(rss_after_upload_kb),
+                        format_optional_u64(rss_after_kb),
+                        archive_size_bytes,
+                        trim_summary.listed_count,
+                        trim_summary.deleted_count,
+                        format_optional_u128(build_elapsed_ms),
+                        format_optional_u128(upload_trim_elapsed_ms),
+                        total_elapsed_ms,
+                    ),
+                );
+            }
+        }
+        result
     }
 
     async fn restore_snapshot_inner(&self, snapshot_key: &str) -> Result<RestoreResult> {
+        let started_at = Instant::now();
+        let rss_before_kb = process_rss_kb();
         let scheduler_status = self.inner.scheduler.status().await;
         if scheduler_status.manual_running || scheduler_status.manual_pending {
             bail!("手动全量刷新正在执行中，请等待其完成后重试");
         }
-        let config = self.inner.config_manager.effective_config().await;
-        let backup = ensure_backup_ready(&config.backup)?;
-        let client = S3CompatibleClient::new(&backup.remote)?;
-        let freeze_guard = self.inner.write_coordinator.begin_restore()?;
-        self.inner.scheduler.pause().await;
+        let mut cache_status = None;
+        let mut downloaded_bytes = None;
+        let mut manifest_normal_count = None;
+        let mut manifest_abnormal_count = None;
         let result = async {
-            let archive_bytes = client.get_object(snapshot_key).await?;
-            let parsed_snapshot = backup_archive::parse_snapshot_archive(&archive_bytes)?;
-            let restored: RestoredSnapshot = {
-                let _commit_guard = self.inner.write_coordinator.lock_commit().await;
-                backup_archive::restore_snapshot_archive(
-                    &self.inner.store,
-                    &self.inner.status_store,
-                    parsed_snapshot,
-                )?
-            };
-            self.inner.scheduler.clear_backoff().await;
-            Ok::<RestoredSnapshot, anyhow::Error>(restored)
+            let config = self.inner.config_manager.effective_config().await;
+            let backup = ensure_backup_ready(&config.backup)?;
+            let (client, status) = self.cached_s3_client(&backup.remote).await?;
+            cache_status = Some(status);
+            let freeze_guard = self.inner.write_coordinator.begin_restore()?;
+            self.inner.scheduler.pause().await;
+            let result = async {
+                let archive_bytes = client.get_object(snapshot_key).await?;
+                downloaded_bytes = Some(archive_bytes.len());
+                let parsed_snapshot = backup_archive::parse_snapshot_archive(&archive_bytes)?;
+                manifest_normal_count = Some(parsed_snapshot.manifest.normal_count);
+                manifest_abnormal_count = Some(parsed_snapshot.manifest.abnormal_count);
+                let restored: RestoredSnapshot = {
+                    let _commit_guard = self.inner.write_coordinator.lock_commit().await;
+                    backup_archive::restore_snapshot_archive(
+                        &self.inner.store,
+                        &self.inner.status_store,
+                        parsed_snapshot,
+                    )?
+                };
+                self.inner.scheduler.clear_backoff().await;
+                Ok::<RestoredSnapshot, anyhow::Error>(restored)
+            }
+            .await;
+            drop(freeze_guard);
+            if self.inner.scheduler.persisted_enabled()? {
+                self.inner.scheduler.resume().await;
+            }
+            result
         }
         .await;
-        drop(freeze_guard);
-        if self.inner.scheduler.persisted_enabled()? {
-            self.inner.scheduler.resume().await;
+        let rss_after_kb = process_rss_kb();
+        let cache_status = cache_status
+            .map(|value| value.as_str())
+            .unwrap_or("unknown");
+        match &result {
+            Ok(restored) => {
+                let _ = self.inner.logger.runtime(
+                    "info",
+                    format!(
+                        "backup restore completed snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} restored_normal_count={} restored_abnormal_count={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                        snapshot_key,
+                        cache_status,
+                        format_optional_usize(downloaded_bytes),
+                        format_optional_usize(manifest_normal_count),
+                        format_optional_usize(manifest_abnormal_count),
+                        restored.normal_count,
+                        restored.abnormal_count,
+                        format_optional_u64(rss_before_kb),
+                        format_optional_u64(rss_after_kb),
+                        started_at.elapsed().as_millis(),
+                    ),
+                );
+            }
+            Err(err) => {
+                let _ = self.inner.logger.runtime(
+                    "error",
+                    format!(
+                        "backup restore failed snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                        snapshot_key,
+                        cache_status,
+                        format_optional_usize(downloaded_bytes),
+                        format_optional_usize(manifest_normal_count),
+                        format_optional_usize(manifest_abnormal_count),
+                        format_optional_u64(rss_before_kb),
+                        format_optional_u64(rss_after_kb),
+                        started_at.elapsed().as_millis(),
+                    ),
+                );
+            }
         }
         let restored = result?;
-        self.inner.logger.runtime(
-            "info",
-            format!("backup restore completed from {}", snapshot_key),
-        )?;
         Ok(RestoreResult {
             snapshot_key: snapshot_key.to_string(),
             normal_count: restored.normal_count,
@@ -425,6 +665,52 @@ impl BackupCoordinator {
             .min()
             .unwrap_or_else(|| Duration::from_secs(30))
             .max(Duration::from_secs(1)))
+    }
+
+    async fn cached_s3_client(
+        &self,
+        remote: &BackupRemoteConfig,
+    ) -> Result<(Arc<S3CompatibleClient>, S3ClientCacheStatus)> {
+        let key = BackupRemoteCacheKey::from_remote_config(remote);
+        {
+            let guard = self.inner.s3_client.read().await;
+            if let Some(cached) = guard.as_ref()
+                && cached.key == key
+            {
+                return Ok((Arc::clone(&cached.client), S3ClientCacheStatus::Hit));
+            }
+        }
+
+        let client = Arc::new(S3CompatibleClient::new(remote)?);
+        let mut guard = self.inner.s3_client.write().await;
+        if let Some(cached) = guard.as_ref()
+            && cached.key == key
+        {
+            return Ok((Arc::clone(&cached.client), S3ClientCacheStatus::Hit));
+        }
+
+        let cache_status = if guard.is_some() {
+            S3ClientCacheStatus::Refreshed
+        } else {
+            S3ClientCacheStatus::Created
+        };
+        *guard = Some(CachedS3Client {
+            key: key.clone(),
+            client: Arc::clone(&client),
+        });
+        let _ = self.inner.logger.runtime(
+            "info",
+            format!(
+                "backup s3 client cache {} endpoint={} bucket={} prefix={} region={} path_style={}",
+                cache_status.as_str(),
+                display_config_value(&key.endpoint),
+                display_config_value(&key.bucket),
+                display_config_value(&key.object_prefix),
+                display_config_value(&key.region),
+                key.path_style,
+            ),
+        );
+        Ok((client, cache_status))
     }
 }
 
@@ -522,12 +808,66 @@ fn build_snapshot_key(
     )
 }
 
-async fn trim_old_snapshots(client: &S3CompatibleClient) -> Result<()> {
+async fn trim_old_snapshots(client: &S3CompatibleClient) -> Result<SnapshotTrimSummary> {
     let snapshots = client.list_snapshots().await?;
+    let listed_count = snapshots.len();
+    let mut deleted_count = 0;
     for snapshot in snapshots.into_iter().skip(1) {
         client.delete_object(&snapshot.key).await?;
+        deleted_count += 1;
     }
-    Ok(())
+    Ok(SnapshotTrimSummary {
+        listed_count,
+        deleted_count,
+    })
+}
+
+fn format_optional_datetime(value: Option<DateTime<Utc>>) -> String {
+    value
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn format_optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "na".to_string())
+}
+
+fn format_optional_u128(value: Option<u128>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "na".to_string())
+}
+
+fn format_optional_usize(value: Option<usize>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "na".to_string())
+}
+
+fn display_config_value(value: &str) -> &str {
+    if value.is_empty() { "-" } else { value }
+}
+
+fn process_rss_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        parse_linux_proc_status_rss_kb(&status)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_proc_status_rss_kb(status: &str) -> Option<u64> {
+    status.lines().find_map(|line| {
+        let value = line.strip_prefix("VmRSS:")?.trim();
+        value.split_whitespace().next()?.parse::<u64>().ok()
+    })
 }
 
 #[cfg(test)]
@@ -576,5 +916,55 @@ mod tests {
         let due_at = compute_after_refresh_due_at(&backup, None, None).unwrap();
 
         assert_eq!(due_at, None);
+    }
+
+    #[test]
+    fn remote_cache_key_normalizes_remote_config_values() {
+        let key = BackupRemoteCacheKey::from_remote_config(&BackupRemoteConfig {
+            kind: " s3_compatible ".to_string(),
+            endpoint: " https://example.com/ ".to_string(),
+            region: " us-east-1 ".to_string(),
+            bucket: " bucket-a ".to_string(),
+            object_prefix: " /snapshots/root/ ".to_string(),
+            access_key_id: " key-id ".to_string(),
+            secret_access_key: " secret-key ".to_string(),
+            path_style: true,
+        });
+
+        assert_eq!(key.kind, "s3_compatible");
+        assert_eq!(key.endpoint, "https://example.com");
+        assert_eq!(key.region, "us-east-1");
+        assert_eq!(key.bucket, "bucket-a");
+        assert_eq!(key.object_prefix, "snapshots/root");
+        assert_eq!(key.access_key_id, "key-id");
+        assert_eq!(key.secret_access_key, "secret-key");
+        assert!(key.path_style);
+    }
+
+    #[test]
+    fn remote_cache_key_changes_when_credentials_change() {
+        let mut first = BackupRemoteConfig::default();
+        first.endpoint = "https://example.com".to_string();
+        first.bucket = "bucket-a".to_string();
+        first.access_key_id = "key-a".to_string();
+        first.secret_access_key = "secret-a".to_string();
+
+        let mut second = first.clone();
+        second.secret_access_key = "secret-b".to_string();
+
+        assert_ne!(
+            BackupRemoteCacheKey::from_remote_config(&first),
+            BackupRemoteCacheKey::from_remote_config(&second)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_linux_proc_status_rss() {
+        let rss = parse_linux_proc_status_rss_kb(
+            "Name:\ttoken-refresh\nState:\tS (sleeping)\nVmRSS:\t   14336 kB\nThreads:\t7\n",
+        );
+
+        assert_eq!(rss, Some(14336));
     }
 }
