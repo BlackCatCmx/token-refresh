@@ -58,7 +58,7 @@ impl RefreshClient {
         config: &AppConfig,
         refresh_token: &str,
         user_agent: &str,
-    ) -> std::result::Result<RefreshResponsePayload, RefreshFailure> {
+    ) -> std::result::Result<RefreshSuccess, RefreshFailure> {
         self.refresh_with_proxy_directive(
             config,
             refresh_token,
@@ -74,7 +74,7 @@ impl RefreshClient {
         refresh_token: &str,
         user_agent: &str,
         proxy: Option<&str>,
-    ) -> std::result::Result<RefreshResponsePayload, RefreshFailure> {
+    ) -> std::result::Result<RefreshSuccess, RefreshFailure> {
         let directive = match proxy {
             Some(value) => ProxyDirective::Force(value.to_string()),
             None => ProxyDirective::ForceNone,
@@ -89,21 +89,26 @@ impl RefreshClient {
         refresh_token: &str,
         user_agent: &str,
         directive: ProxyDirective,
-    ) -> std::result::Result<RefreshResponsePayload, RefreshFailure> {
+    ) -> std::result::Result<RefreshSuccess, RefreshFailure> {
         let (client, proxy_used) = self
             .client_for(config, directive)
             .map_err(|err| RefreshFailure::transient("client_build_failed", err.to_string()))?;
         let proxy_host = proxy_used.as_deref().and_then(proxy_host_label);
+        let proxy_label = proxy_route_label(proxy_host.as_deref());
         let mut headers = HeaderMap::new();
         headers.insert(
             "originator",
-            HeaderValue::from_str(config.request_identity.originator.trim())
-                .map_err(|err| RefreshFailure::transient("invalid_originator", err.to_string()))?,
+            HeaderValue::from_str(config.request_identity.originator.trim()).map_err(|err| {
+                RefreshFailure::transient("invalid_originator", err.to_string())
+                    .with_proxy_host(proxy_host.clone())
+            })?,
         );
         headers.insert(
             "user-agent",
-            HeaderValue::from_str(user_agent.trim())
-                .map_err(|err| RefreshFailure::transient("invalid_user_agent", err.to_string()))?,
+            HeaderValue::from_str(user_agent.trim()).map_err(|err| {
+                RefreshFailure::transient("invalid_user_agent", err.to_string())
+                    .with_proxy_host(proxy_host.clone())
+            })?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -126,9 +131,13 @@ impl RefreshClient {
         if !status.is_success() {
             return Err(classify_http_error(status.as_u16(), &body).with_proxy_host(proxy_host));
         }
-        serde_json::from_str::<RefreshResponsePayload>(&body).map_err(|err| {
+        let payload = serde_json::from_str::<RefreshResponsePayload>(&body).map_err(|err| {
             RefreshFailure::transient("invalid_refresh_response", err.to_string())
                 .with_proxy_host(proxy_host)
+        })?;
+        Ok(RefreshSuccess {
+            payload,
+            proxy_label,
         })
     }
 
@@ -205,6 +214,12 @@ pub struct RefreshResponsePayload {
     pub error_description: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RefreshSuccess {
+    pub payload: RefreshResponsePayload,
+    pub proxy_label: String,
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{code}: {reason}")]
 pub struct RefreshFailure {
@@ -212,6 +227,7 @@ pub struct RefreshFailure {
     pub reason: String,
     pub count_towards_abnormal: bool,
     pub proxy_host: Option<String>,
+    pub proxy_label: Option<String>,
 }
 
 impl RefreshFailure {
@@ -221,6 +237,7 @@ impl RefreshFailure {
             reason: reason.into(),
             count_towards_abnormal: false,
             proxy_host: None,
+            proxy_label: None,
         }
     }
 
@@ -230,10 +247,12 @@ impl RefreshFailure {
             reason: reason.into(),
             count_towards_abnormal: true,
             proxy_host: None,
+            proxy_label: None,
         }
     }
 
     pub fn with_proxy_host(mut self, proxy_host: Option<String>) -> Self {
+        self.proxy_label = Some(proxy_route_label(proxy_host.as_deref()));
         self.proxy_host = proxy_host;
         self
     }
@@ -244,6 +263,10 @@ fn proxy_host_label(proxy: &str) -> Option<String> {
     let host = url.host_str()?;
     let port = url.port()?;
     Some(format!("{host}:{port}"))
+}
+
+fn proxy_route_label(proxy_host: Option<&str>) -> String {
+    proxy_host.unwrap_or("direct").to_string()
 }
 
 fn classify_transport_error(error: reqwest::Error, proxy_host: Option<String>) -> RefreshFailure {
@@ -384,5 +407,24 @@ mod tests {
     async fn force_none_disables_system_proxy() {
         let config = test_config();
         assert!(!request_uses_proxy(&config, ProxyDirective::ForceNone).await);
+    }
+
+    #[test]
+    fn proxy_route_label_uses_direct_when_proxy_is_missing() {
+        assert_eq!(proxy_route_label(None), "direct");
+        assert_eq!(
+            proxy_route_label(Some("127.0.0.1:10808")),
+            "127.0.0.1:10808"
+        );
+    }
+
+    #[test]
+    fn with_proxy_host_sets_proxy_label() {
+        let direct = RefreshFailure::transient("code", "reason").with_proxy_host(None);
+        assert_eq!(direct.proxy_label.as_deref(), Some("direct"));
+
+        let proxied = RefreshFailure::transient("code", "reason")
+            .with_proxy_host(Some("127.0.0.1:10808".to_string()));
+        assert_eq!(proxied.proxy_label.as_deref(), Some("127.0.0.1:10808"));
     }
 }

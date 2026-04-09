@@ -9,7 +9,9 @@ use crate::credential_store::{CredentialStore, CredentialZone};
 use crate::jwt;
 use crate::logging::LogManager;
 use crate::recovery;
-use crate::refresh_client::{RefreshClient, RefreshFailure, RefreshResponsePayload};
+use crate::refresh_client::{
+    RefreshClient, RefreshFailure, RefreshResponsePayload, RefreshSuccess,
+};
 use crate::status::CredentialStatusStore;
 use crate::write_coordinator::WriteCoordinator;
 
@@ -187,10 +189,11 @@ impl RefreshTransaction {
         trigger: RefreshTrigger,
         generation: u64,
         credential: &mut CodexCredentialFile,
-        payload: RefreshResponsePayload,
+        success: RefreshSuccess,
     ) -> Result<RefreshOutcome> {
         let previous_refresh_token = credential.refresh_token.clone();
-        merge_refresh_response(credential, payload)?;
+        let proxy_label = success.proxy_label;
+        merge_refresh_response(credential, success.payload)?;
         credential.provider_type = "codex".to_string();
         credential.set_last_refresh_now();
         {
@@ -220,11 +223,12 @@ impl RefreshTransaction {
         self.logger.runtime(
             "info",
             format!(
-                "refresh succeeded for {} in {} via {} (expires_at={}, refresh_token_rotated={})",
+                "refresh succeeded for {} in {} via {} (expires_at={}, proxy={}, refresh_token_rotated={})",
                 key,
                 zone.as_str(),
                 trigger.as_str(),
                 credential.expired.as_deref().unwrap_or("-"),
+                proxy_label,
                 credential.refresh_token != previous_refresh_token
             ),
         )?;
@@ -243,7 +247,7 @@ impl RefreshTransaction {
         refresh_token: &str,
         user_agent: &str,
         key: &str,
-    ) -> Result<std::result::Result<RefreshResponsePayload, RefreshFailure>> {
+    ) -> Result<std::result::Result<RefreshSuccess, RefreshFailure>> {
         let proxies = match crate::proxy::validate_proxy_list(&config.proxy.list) {
             Ok(value) => value,
             Err(err) => {
@@ -318,7 +322,7 @@ impl RefreshTransaction {
                             runtime_warn_best_effort(
                                 self.logger.as_ref(),
                                 format!(
-                                    "全部代理连接失败，回退到直连 (key={}, last_proxy={})",
+                                    "全部代理连接失败，回退到直连 (key={}, proxy={})",
                                     key, proxy_host
                                 ),
                             );
@@ -406,11 +410,12 @@ impl RefreshTransaction {
         self.logger.runtime(
             "warn",
             format!(
-                "refresh failed for {} in {} via {} (code={}, failure_count={}, count_towards_abnormal={}, moved_to_abnormal={}, final_zone={}): {}",
+                "refresh failed for {} in {} via {} (code={}, proxy={}, failure_count={}, count_towards_abnormal={}, moved_to_abnormal={}, final_zone={}): {}",
                 key,
                 zone.as_str(),
                 trigger.as_str(),
                 error.code,
+                proxy_attempt_label(error.proxy_label.as_deref()),
                 failure_count,
                 error.count_towards_abnormal,
                 moved,
@@ -434,6 +439,10 @@ fn should_fallback_due_to_proxy_connect(error: &RefreshFailure) -> bool {
 
 fn runtime_warn_best_effort(logger: &LogManager, message: impl AsRef<str>) {
     let _ = logger.runtime("warn", message);
+}
+
+fn proxy_attempt_label(proxy_label: Option<&str>) -> &str {
+    proxy_label.unwrap_or("not_attempted")
 }
 
 fn merge_refresh_response(
@@ -600,5 +609,15 @@ mod tests {
         std::fs::create_dir(&runtime_log).unwrap();
 
         runtime_warn_best_effort(&logger, "proxy fallback warning");
+    }
+
+    #[test]
+    fn proxy_attempt_label_defaults_to_not_attempted() {
+        assert_eq!(proxy_attempt_label(None), "not_attempted");
+        assert_eq!(proxy_attempt_label(Some("direct")), "direct");
+        assert_eq!(
+            proxy_attempt_label(Some("127.0.0.1:10808")),
+            "127.0.0.1:10808"
+        );
     }
 }
