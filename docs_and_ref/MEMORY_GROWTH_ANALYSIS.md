@@ -2,18 +2,19 @@
 
 ## 现象
 
-- Zeabur 监控显示进程 RSS 随时间阶梯式上涨，约 `4MB -> 14MB / 12h`，仅重启后回落。
-- 2026-04-09 的 2 小时观测窗口内，RSS 再次出现 `2MB -> 3MB -> 4MB -> 5MB -> 6MB` 的阶梯上涨。
-- 最新运行日志已证明：每一次台阶都与 `after-refresh` 自动备份时间高度一致。
+- **jemalloc 部署前**：Zeabur 监控显示内存阶梯式单调上涨，约 `4MB → 14MB / 12h`，仅重启后回落。
+- **jemalloc 部署后**（`a551059`）：
+  - UTC+8 22:01–06:36 期间，内存在 `4–8MB` 间波动，不再单调上涨，说明 jemalloc 有释放页面的效果。
+  - UTC+8 06:36 左右出现一次明显跳升（`~6MB → ~10MB`），随后继续攀升至 `~12MB`。
+  - 同时段 runtime.log 中的 VmRSS 并未同步上涨，后半段反而回落（`14608 → 13152 → 11728 KB`）。
+  - **关键矛盾**：Zeabur 面板持续上升 vs 进程 VmRSS 下降，说明面板指标口径 ≠ 进程 RSS，疑似包含容器级页缓存。
 
 ## 当前有效提交
 
 | Commit | 内容 | 状态 |
 |------|------|------|
-| `b2c0224` | 为备份链路加入 RSS 诊断日志、S3 客户端缓存，并同步提交分析文档 | 已部署并产生日志 |
-| `a551059` | Linux 环境切换为 `jemalloc` 全局分配器 | 已提交，待部署验证 |
-
-> 说明：此前用于过渡的本地提交已被整理，以上为当前应参考的有效提交。
+| `b2c0224` | 为备份链路加入 RSS 诊断日志、S3 客户端缓存，并同步提交分析文档 | 已部署 |
+| `a551059` | Linux 环境切换为 `jemalloc` 全局分配器 | 已部署，VmRSS 波动改善 |
 
 ## 已落地改动
 
@@ -29,14 +30,27 @@
 
 - `cache`
 - `rss_before_kb`
+- `cg_before_kb`
+- `cg_anon_before_kb`
+- `cg_file_before_kb`
 - `rss_after_archive_kb`
 - `rss_after_upload_kb`
-- `rss_after_kb`
+- `cg_after_upload_kb`
+- `upload_ms`
+- `rss_after_list_kb`
+- `cg_after_list_kb`
+- `list_ms`
+- `rss_after_delete_kb`
+- `cg_after_delete_kb`
+- `delete_ms`
+- `rss_after_drop_kb`
+- `cg_after_drop_kb`
+- `cg_anon_drop_kb`
+- `cg_file_drop_kb`
 - `archive_size_bytes`
 - `snapshots_seen`
 - `snapshots_deleted`
 - `build_ms`
-- `upload_trim_ms`
 - `total_ms`
 
 RSS 采集实现以 Linux `/proc/self/status` 中的 `VmRSS` 为准；非 Linux 环境返回 `None`。
@@ -62,7 +76,7 @@ RSS 采集实现以 Linux `/proc/self/status` 中的 `VmRSS` 为准；非 Linux 
 
 ## 运行时证据
 
-以下数据来自 `b2c0224` 部署后的实际日志。日志时间为 UTC，Zeabur 面板按 `UTC+8` 显示。
+以下数据来自 `b2c0224` 部署后的历史日志。该批日志时间为 UTC；当前代码已改为按 `UTC+8` 写入，便于与 Zeabur 面板对齐。
 
 | 备份 | 本地时间（UTC+8） | cache | rss_before_kb | rss_after_archive_kb | rss_after_upload_kb | rss_after_kb | 常驻增量 |
 |------|------|------|------|------|------|------|------|
@@ -106,35 +120,49 @@ RSS 采集实现以 Linux `/proc/self/status` 中的 `VmRSS` 为准；非 Linux 
 | ZIP 文件缓冲长期留在堆中 | 排除 | 当前备份写入 `tempfile`，不是堆内常驻缓冲 |
 | `mark_dirty` 的短任务是主因 | 降权 | 任务很短，量级不足以解释当前台阶 |
 
-## 当前执行方案
+## 阶段 A 结果：jemalloc 部署后观察
 
-### 阶段 A：保留现有日志，部署 `a551059`
+`a551059` 部署后的 runtime.log 显示 `rss_before_kb` 不再单调递增，而是在 12–16MB 间波动，后半段明显回落（14608→13152→13380→11728）。这是 jemalloc 释放脏页的典型表现，说明 jemalloc 大概率已生效。
 
-目标：
+但 Zeabur 面板在 UTC+8 2026-04-10 06:56 左右仍显示内存攀升，而同时段 VmRSS 并未同步上涨。这表明 Zeabur 监控的指标口径 ≠ 进程 VmRSS，更可能包含容器级页缓存。
 
-- 验证切换到 `jemalloc` 后，备份结束时 RSS 是否能回落到接近备份前水平。
+## 当前执行方案（阶段 B）
 
-预期：
+### 已落地改动
 
-- 备份过程中的瞬时 RSS 仍可能升高。
-- 若 `jemalloc` 有效，`rss_after_kb` 应明显低于当前日志中的持续抬升趋势。
+1. **cgroup 内存采集**：新增读取 `/sys/fs/cgroup/memory.current`（v2）或 `memory.usage_in_bytes`（v1），同时从 `memory.stat` 提取 `anon`（v2）/ `rss`（v1）和 `file`（v2）/ `cache`（v1）
+2. **拆分 upload_trim_ms**：原来合并的上传+裁剪阶段拆为三段独立计时和采样：
+   - `put_object_stream` 前后（`upload_ms`）
+   - `list_snapshots` 前后（`list_ms`）
+   - `delete_object` 前后（`delete_ms`）
+3. **tempfile drop 后采样**：显式 drop 临时文件句柄后再采一次完整 MemSample（rss + cg + anon + file）
 
-### 阶段 B：若 `a551059` 部署后仍持续台阶上涨
+### 目标
 
-下一步仅继续细化备份链路日志，不扩大排查范围：
+一轮日志（2–3 次备份）即可判断：
 
-- `put_object_stream` 前后
-- `list_snapshots` 前后
-- 每次 `delete_object` 前后
+- VmRSS 涨但 cg 不涨 → 不太可能
+- cg 涨但 VmRSS 不涨 → 页缓存 / 容器层内存
+- `cg_file` 涨明显 → 临时文件页缓存未回收
+- `cg_anon` 涨明显 → 堆分配未释放
 
-目标是区分：
+### 日志字段说明
 
-- 上传抬高 RSS
-- 列举快照抬高 RSS
-- 删除旧快照抬高 RSS
+`backup started` 新增：`cg_before_kb`、`cg_anon_kb`、`cg_file_kb`
+
+`backup finished` 新增（替代原 `upload_trim_ms` 和 `rss_after_kb`）：
+
+| 阶段 | 字段 |
+|------|------|
+| before | `rss_before_kb` `cg_before_kb` `cg_anon_before_kb` `cg_file_before_kb` |
+| after archive | `rss_after_archive_kb` |
+| after upload | `rss_after_upload_kb` `cg_after_upload_kb` `upload_ms` |
+| after list | `rss_after_list_kb` `cg_after_list_kb` `list_ms` |
+| after delete | `rss_after_delete_kb` `cg_after_delete_kb` `delete_ms` |
+| after drop | `rss_after_drop_kb` `cg_after_drop_kb` `cg_anon_drop_kb` `cg_file_drop_kb` |
 
 ## 当前判断边界
 
-- 现有日志已足以证明“备份链路触发 RSS 台阶上涨”。
-- 现有日志尚不足以区分“分配器行为”与“库内部保留对象”各自占比。
-- `jemalloc` 是当前成本最低、最适合先行验证的缓解方案。
+- jemalloc 大概率已解决进程堆级别的 RSS 不回落问题。
+- Zeabur 面板攀升的根因尚需 cgroup 数据确认，最大嫌疑是容器页缓存。
+- 新日志无需额外依赖，仅读取 procfs / cgroupfs。

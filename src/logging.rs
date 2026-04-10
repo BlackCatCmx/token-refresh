@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use chrono::{FixedOffset, Utc};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogKind {
@@ -106,7 +106,7 @@ impl LogManager {
             self.runtime_path.as_path(),
             format!(
                 "{} [{}] {}\n",
-                Utc::now().to_rfc3339(),
+                log_timestamp(),
                 level.to_ascii_uppercase(),
                 message.as_ref()
             ),
@@ -116,7 +116,7 @@ impl LogManager {
     pub fn audit(&self, message: impl AsRef<str>) -> Result<()> {
         self.append(
             self.audit_path.as_path(),
-            format!("{} {}\n", Utc::now().to_rfc3339(), message.as_ref()),
+            format!("{} {}\n", log_timestamp(), message.as_ref()),
         )
     }
 
@@ -214,6 +214,11 @@ fn read_tail_lines(path: &Path, limit_lines: usize) -> Result<String> {
     Ok(lines[start..].join("\n"))
 }
 
+fn log_timestamp() -> String {
+    let offset = FixedOffset::east_opt(8 * 60 * 60).expect("UTC+8 offset must be valid");
+    Utc::now().with_timezone(&offset).to_rfc3339()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +264,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         assert!(LogManager::new(temp.path(), 1024, "debug").is_err());
         assert!(LogManager::new(temp.path(), 1024, "trace").is_err());
+    }
+
+    #[test]
+    fn writes_logs_in_utc_plus_8_offset() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = LogManager::new(temp.path(), 1024, "info").unwrap();
+        manager.runtime("info", "check offset").unwrap();
+        let content = std::fs::read_to_string(temp.path().join("logs/runtime.log")).unwrap();
+        let timestamp = content.split_whitespace().next().unwrap();
+        assert!(timestamp.ends_with("+08:00"));
     }
 }

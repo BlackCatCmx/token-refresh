@@ -149,6 +149,21 @@ struct SnapshotTrimSummary {
     deleted_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct MemSample {
+    rss_kb: Option<u64>,
+    cg_kb: Option<u64>,
+    cg_anon_kb: Option<u64>,
+    cg_file_kb: Option<u64>,
+}
+
+impl MemSample {
+    fn fmt_rss(&self) -> String { format_optional_u64(self.rss_kb) }
+    fn fmt_cg(&self) -> String { format_optional_u64(self.cg_kb) }
+    fn fmt_anon(&self) -> String { format_optional_u64(self.cg_anon_kb) }
+    fn fmt_file(&self) -> String { format_optional_u64(self.cg_file_kb) }
+}
+
 impl BackupCoordinator {
     pub fn new(
         config_manager: ConfigManager,
@@ -368,15 +383,18 @@ impl BackupCoordinator {
 
     async fn run_backup_once(&self, trigger: BackupTrigger) -> Result<RemoteSnapshot> {
         let started_at = Instant::now();
-        let rss_before_kb = process_rss_kb();
+        let mem_before = mem_sample_full();
         let dirty_since = *self.inner.dirty_since.read().await;
         let last_auto_backup_at = *self.inner.last_auto_backup_at.read().await;
         let _ = self.inner.logger.runtime(
             "info",
             format!(
-                "backup started trigger={} rss_before_kb={} dirty_since={} last_auto_backup_at={}",
+                "backup started trigger={} rss_before_kb={} cg_before_kb={} cg_anon_kb={} cg_file_kb={} dirty_since={} last_auto_backup_at={}",
                 trigger.as_str(),
-                format_optional_u64(rss_before_kb),
+                mem_before.fmt_rss(),
+                mem_before.fmt_cg(),
+                mem_before.fmt_anon(),
+                mem_before.fmt_file(),
                 format_optional_datetime(dirty_since),
                 format_optional_datetime(last_auto_backup_at),
             ),
@@ -386,9 +404,14 @@ impl BackupCoordinator {
         let mut snapshot_key_for_log: Option<String> = None;
         let mut archive_size_bytes = None;
         let mut rss_after_archive_kb = None;
-        let mut rss_after_upload_kb = None;
+        let mut mem_after_upload = MemSample::default();
+        let mut mem_after_list = MemSample::default();
+        let mut mem_after_delete = MemSample::default();
+        let mut mem_after_drop = MemSample::default();
         let mut build_elapsed_ms = None;
-        let mut upload_trim_elapsed_ms = None;
+        let mut upload_elapsed_ms = None;
+        let mut list_elapsed_ms = None;
+        let mut delete_elapsed_ms = None;
         let mut trim_summary = SnapshotTrimSummary::default();
 
         let result = async {
@@ -443,9 +466,28 @@ impl BackupCoordinator {
             client
                 .put_object_stream(&snapshot_key, &mut upload_file)
                 .await?;
-            trim_summary = trim_old_snapshots(&client).await?;
-            rss_after_upload_kb = process_rss_kb();
-            upload_trim_elapsed_ms = Some(upload_started_at.elapsed().as_millis());
+            mem_after_upload = mem_sample();
+            upload_elapsed_ms = Some(upload_started_at.elapsed().as_millis());
+
+            let list_started_at = Instant::now();
+            let snapshots = client.list_snapshots().await?;
+            let listed_count = snapshots.len();
+            mem_after_list = mem_sample();
+            list_elapsed_ms = Some(list_started_at.elapsed().as_millis());
+
+            let delete_started_at = Instant::now();
+            let mut deleted_count = 0;
+            for snapshot in snapshots.into_iter().skip(1) {
+                client.delete_object(&snapshot.key).await?;
+                deleted_count += 1;
+            }
+            mem_after_delete = mem_sample();
+            delete_elapsed_ms = Some(delete_started_at.elapsed().as_millis());
+            trim_summary = SnapshotTrimSummary { listed_count, deleted_count };
+
+            drop(upload_file);
+            drop(archive_file);
+            mem_after_drop = mem_sample_full();
             {
                 let mut status = self.inner.status.write().await;
                 status.last_success_at = Some(created_at.to_rfc3339());
@@ -478,7 +520,7 @@ impl BackupCoordinator {
         }
         .await;
 
-        let rss_after_kb = process_rss_kb();
+        let mem_final = mem_sample_full();
         let cache_status = cache_status
             .map(|value| value.as_str())
             .unwrap_or("unknown");
@@ -492,19 +534,32 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "info",
                     format!(
-                        "backup finished trigger={} key={} cache={} rss_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} rss_after_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_trim_ms={} total_ms={}",
+                        "backup finished trigger={} key={} cache={} rss_before_kb={} cg_before_kb={} cg_anon_before_kb={} cg_file_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} upload_ms={} rss_after_list_kb={} cg_after_list_kb={} list_ms={} rss_after_delete_kb={} cg_after_delete_kb={} delete_ms={} rss_after_drop_kb={} cg_after_drop_kb={} cg_anon_drop_kb={} cg_file_drop_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} total_ms={}",
                         trigger.as_str(),
                         snapshot.key,
                         cache_status,
-                        format_optional_u64(rss_before_kb),
+                        mem_before.fmt_rss(),
+                        mem_before.fmt_cg(),
+                        mem_before.fmt_anon(),
+                        mem_before.fmt_file(),
                         format_optional_u64(rss_after_archive_kb),
-                        format_optional_u64(rss_after_upload_kb),
-                        format_optional_u64(rss_after_kb),
+                        mem_after_upload.fmt_rss(),
+                        mem_after_upload.fmt_cg(),
+                        format_optional_u128(upload_elapsed_ms),
+                        mem_after_list.fmt_rss(),
+                        mem_after_list.fmt_cg(),
+                        format_optional_u128(list_elapsed_ms),
+                        mem_after_delete.fmt_rss(),
+                        mem_after_delete.fmt_cg(),
+                        format_optional_u128(delete_elapsed_ms),
+                        mem_after_drop.fmt_rss(),
+                        mem_after_drop.fmt_cg(),
+                        mem_after_drop.fmt_anon(),
+                        mem_after_drop.fmt_file(),
                         archive_size_bytes,
                         trim_summary.listed_count,
                         trim_summary.deleted_count,
                         format_optional_u128(build_elapsed_ms),
-                        format_optional_u128(upload_trim_elapsed_ms),
                         total_elapsed_ms,
                     ),
                 );
@@ -513,19 +568,26 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "error",
                     format!(
-                        "backup failed trigger={} key={} cache={} rss_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} rss_after_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_trim_ms={} total_ms={} err={err:#}",
+                        "backup failed trigger={} key={} cache={} rss_before_kb={} cg_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} rss_final_kb={} cg_final_kb={} cg_anon_final_kb={} cg_file_final_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={} err={err:#}",
                         trigger.as_str(),
                         snapshot_key,
                         cache_status,
-                        format_optional_u64(rss_before_kb),
+                        mem_before.fmt_rss(),
+                        mem_before.fmt_cg(),
                         format_optional_u64(rss_after_archive_kb),
-                        format_optional_u64(rss_after_upload_kb),
-                        format_optional_u64(rss_after_kb),
+                        mem_after_upload.fmt_rss(),
+                        mem_after_upload.fmt_cg(),
+                        mem_final.fmt_rss(),
+                        mem_final.fmt_cg(),
+                        mem_final.fmt_anon(),
+                        mem_final.fmt_file(),
                         archive_size_bytes,
                         trim_summary.listed_count,
                         trim_summary.deleted_count,
                         format_optional_u128(build_elapsed_ms),
-                        format_optional_u128(upload_trim_elapsed_ms),
+                        format_optional_u128(upload_elapsed_ms),
+                        format_optional_u128(list_elapsed_ms),
+                        format_optional_u128(delete_elapsed_ms),
                         total_elapsed_ms,
                     ),
                 );
@@ -808,20 +870,6 @@ fn build_snapshot_key(
     )
 }
 
-async fn trim_old_snapshots(client: &S3CompatibleClient) -> Result<SnapshotTrimSummary> {
-    let snapshots = client.list_snapshots().await?;
-    let listed_count = snapshots.len();
-    let mut deleted_count = 0;
-    for snapshot in snapshots.into_iter().skip(1) {
-        client.delete_object(&snapshot.key).await?;
-        deleted_count += 1;
-    }
-    Ok(SnapshotTrimSummary {
-        listed_count,
-        deleted_count,
-    })
-}
-
 fn format_optional_datetime(value: Option<DateTime<Utc>>) -> String {
     value
         .map(|value| value.to_rfc3339())
@@ -868,6 +916,85 @@ fn parse_linux_proc_status_rss_kb(status: &str) -> Option<u64> {
         let value = line.strip_prefix("VmRSS:")?.trim();
         value.split_whitespace().next()?.parse::<u64>().ok()
     })
+}
+
+fn cgroup_memory_current_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.current") {
+            if let Ok(bytes) = s.trim().parse::<u64>() {
+                return Some(bytes / 1024);
+            }
+        }
+        if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes") {
+            if let Ok(bytes) = s.trim().parse::<u64>() {
+                return Some(bytes / 1024);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn cgroup_memory_stat_anon_file_kb() -> (Option<u64>, Option<u64>) {
+    #[cfg(target_os = "linux")]
+    {
+        // cgroup v2: "anon" / "file"
+        if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory.stat") {
+            return parse_cgroup_stat_pair(&content, "anon", "file");
+        }
+        // cgroup v1: "rss" / "cache"
+        if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.stat") {
+            return parse_cgroup_stat_pair(&content, "rss", "cache");
+        }
+        (None, None)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (None, None)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_stat_pair(content: &str, key_a: &str, key_b: &str) -> (Option<u64>, Option<u64>) {
+    let mut a = None;
+    let mut b = None;
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        if let Some(key) = parts.next() {
+            let val = || parts.next().and_then(|v| v.parse::<u64>().ok()).map(|v| v / 1024);
+            if key == key_a && a.is_none() {
+                a = val();
+            } else if key == key_b && b.is_none() {
+                b = val();
+            }
+        }
+        if a.is_some() && b.is_some() {
+            break;
+        }
+    }
+    (a, b)
+}
+
+fn mem_sample() -> MemSample {
+    MemSample {
+        rss_kb: process_rss_kb(),
+        cg_kb: cgroup_memory_current_kb(),
+        ..MemSample::default()
+    }
+}
+
+fn mem_sample_full() -> MemSample {
+    let (anon, file) = cgroup_memory_stat_anon_file_kb();
+    MemSample {
+        rss_kb: process_rss_kb(),
+        cg_kb: cgroup_memory_current_kb(),
+        cg_anon_kb: anon,
+        cg_file_kb: file,
+    }
 }
 
 #[cfg(test)]
