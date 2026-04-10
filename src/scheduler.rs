@@ -26,6 +26,8 @@ pub struct SchedulerStatus {
     pub current_key: Option<String>,
     pub last_cycle_at: Option<String>,
     pub next_wake_at: Option<String>,
+    pub next_due_at: Option<String>,
+    pub wait_reason: Option<String>,
     pub last_error: Option<String>,
     pub manual_pending: bool,
     pub manual_running: bool,
@@ -252,6 +254,8 @@ impl SchedulerHandle {
             if !enabled {
                 status.current_key = None;
                 status.next_wake_at = None;
+                status.next_due_at = None;
+                status.wait_reason = None;
             }
             if clear_last_error {
                 status.last_error = None;
@@ -286,6 +290,8 @@ impl SchedulerRuntime {
                     status.enabled = false;
                     status.current_key = None;
                     status.next_wake_at = None;
+                    status.next_due_at = None;
+                    status.wait_reason = None;
                 }
                 self.notify.notified().await;
                 continue;
@@ -335,10 +341,18 @@ impl SchedulerRuntime {
             let mut status = self.status.write().await;
             status.enabled = true;
             status.last_cycle_at = Some(now.to_rfc3339());
-            status.next_wake_at = next_wake_at.map(|value| value.to_rfc3339());
+            status.next_wake_at = None;
+            status.next_due_at = next_wake_at.map(|value| value.to_rfc3339());
+            status.wait_reason = None;
         }
         if due_entries.is_empty() {
             let sleep_duration = compute_idle_sleep(&config, now, next_wake_at)?;
+            let next_check_at = advance_time(now, sleep_duration)?;
+            {
+                let mut status = self.status.write().await;
+                status.next_wake_at = Some(next_check_at.to_rfc3339());
+                status.wait_reason = Some("idle_sleep".to_string());
+            }
             tokio::select! {
                 _ = tokio::time::sleep(sleep_duration) => {}
                 _ = self.notify.notified() => {}
@@ -349,7 +363,7 @@ impl SchedulerRuntime {
         let _ = self.logger.runtime(
             "info",
             format!(
-                "scheduler picked {} due credential(s); next_wake_at={}",
+                "scheduler picked {} due credential(s); next_due_at={}",
                 due_entries.len(),
                 next_wake_at
                     .map(|value| value.to_rfc3339())
@@ -365,6 +379,8 @@ impl SchedulerRuntime {
                 let mut status = self.status.write().await;
                 status.current_key = Some(key.clone());
                 status.last_error = None;
+                status.next_wake_at = None;
+                status.wait_reason = None;
             }
             let outcome = self
                 .transaction
@@ -393,12 +409,23 @@ impl SchedulerRuntime {
                 parse_duration_str(&config.refresh.inter_refresh_delay_min)?,
                 parse_duration_str(&config.refresh.inter_refresh_delay_max)?,
             );
+            let next_check_at = advance_time(Utc::now(), delay)?;
+            {
+                let mut status = self.status.write().await;
+                status.next_wake_at = Some(next_check_at.to_rfc3339());
+                status.wait_reason = Some("inter_refresh_delay".to_string());
+            }
             let mut wake_requested = false;
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = self.notify.notified() => {
                     wake_requested = true;
                 }
+            }
+            {
+                let mut status = self.status.write().await;
+                status.next_wake_at = None;
+                status.wait_reason = None;
             }
             if wake_requested {
                 // Re-run planning with the latest config/state instead of continuing
@@ -519,6 +546,8 @@ impl SchedulerRuntime {
         let had_manual_activity = status.manual_pending || status.manual_running;
         status.current_key = None;
         status.next_wake_at = None;
+        status.next_due_at = None;
+        status.wait_reason = None;
         status.last_error = Some(format!("scheduler runtime panicked and restarted: {error}"));
         if had_manual_activity {
             status.manual_pending = false;
@@ -588,6 +617,12 @@ fn random_delay(min: Duration, max: Duration) -> Duration {
     let max_ms = max.as_millis() as u64;
     let value = rand::rng().random_range(min_ms..=max_ms);
     Duration::from_millis(value)
+}
+
+fn advance_time(now: DateTime<Utc>, delay: Duration) -> Result<DateTime<Utc>> {
+    Ok(now
+        + chrono::Duration::from_std(delay)
+            .map_err(|err| anyhow::anyhow!("invalid scheduler duration: {err}"))?)
 }
 
 fn persisted_backoff_until(

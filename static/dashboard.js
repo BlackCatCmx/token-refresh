@@ -64,8 +64,10 @@ async function loadScheduler() {
     <span>${escapeHtml(data.scheduled_credential_count ?? "—")}</span>
     <span class="status-label">当前刷新账号</span>
     <span>${escapeHtml(data.current_key || "无")}</span>
-    <span class="status-label">下一个账号刷新时间</span>
-    <span>${escapeHtml(data.next_wake_at ? shortTime(data.next_wake_at) : "待定")}</span>
+    <span class="status-label">下一次调度检查</span>
+    <span>${escapeHtml(formatSchedulerNextCheck(data))}</span>
+    <span class="status-label">下一个未到期账号时间</span>
+    <span>${escapeHtml(formatSchedulerNextDue(data))}</span>
     <span class="status-label">最近错误</span>
     <span${data.last_error ? ' class="danger-text"' : ""}>${escapeHtml(data.last_error || "无")}</span>
     <span class="status-label">手动全量刷新</span>
@@ -91,10 +93,11 @@ async function loadScheduler() {
     clearTimeout(schedulerPollTimer);
     schedulerPollTimer = null;
   }
-  if (data.current_key || manualBusy) {
+  if (data.enabled || data.current_key || manualBusy) {
+    const pollDelay = data.current_key || manualBusy ? 2000 : 5000;
     schedulerPollTimer = setTimeout(() => {
       loadScheduler().catch((error) => console.error(error));
-    }, 2000);
+    }, pollDelay);
   }
   if (schedulerManualActive && !manualBusy) {
     schedulerManualActive = false;
@@ -168,6 +171,43 @@ function formatAfterRefreshBackupStatus(data) {
     return `${data.running ? "执行中" : "已到执行时间，等待执行"}（计划点 ${displayTime}）`;
   }
   return `预计 ${displayTime}`;
+}
+
+function formatSchedulerNextCheck(data) {
+  if (data.current_key) return "执行中";
+  if (!data.enabled) return "已停止";
+  if (!data.next_wake_at) return "待定";
+  const displayTime = shortTime(data.next_wake_at);
+  const dueAt = new Date(data.next_wake_at);
+  const reason = formatSchedulerWaitReason(data.wait_reason);
+  if (isNaN(dueAt.getTime())) return `${displayTime}${reason}`;
+  if (dueAt.getTime() <= Date.now()) {
+    return `${displayTime}${reason}，等待状态刷新`;
+  }
+  return `${displayTime}${reason}`;
+}
+
+function formatSchedulerNextDue(data) {
+  if (!data.enabled) return "待定";
+  if (!data.next_due_at) return "待定";
+  const displayTime = shortTime(data.next_due_at);
+  const dueAt = new Date(data.next_due_at);
+  if (isNaN(dueAt.getTime())) return displayTime;
+  if (dueAt.getTime() <= Date.now()) {
+    return `已到期（计划点 ${displayTime}）`;
+  }
+  return displayTime;
+}
+
+function formatSchedulerWaitReason(reason) {
+  switch (reason) {
+    case "inter_refresh_delay":
+      return "（账号间延迟）";
+    case "idle_sleep":
+      return "（等待下一次检查）";
+    default:
+      return "";
+  }
 }
 
 function shortTime(rfc3339) {
@@ -852,6 +892,7 @@ function classifyLogLine(line) {
   if (
     normalized.includes("refresh succeeded") ||
     normalized.includes("refresh_success") ||
+    normalized.includes("backup finished") ||
     normalized.includes("backup uploaded successfully") ||
     normalized.includes("backup restore completed")
   ) {

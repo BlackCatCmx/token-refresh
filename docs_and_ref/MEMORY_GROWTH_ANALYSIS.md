@@ -28,6 +28,8 @@
 
 当前日志字段包括：
 
+- `backup finished` 成功摘要行
+- `backup metrics` 内存调试行
 - `cache`
 - `rss_before_kb`
 - `cg_before_kb`
@@ -150,7 +152,18 @@ RSS 采集实现以 Linux `/proc/self/status` 中的 `VmRSS` 为准；非 Linux 
 
 `backup started` 新增：`cg_before_kb`、`cg_anon_kb`、`cg_file_kb`
 
-`backup finished` 新增（替代原 `upload_trim_ms` 和 `rss_after_kb`）：
+`backup finished` 记录成功摘要：
+
+- `archive_size_bytes`
+- `snapshots_seen`
+- `snapshots_deleted`
+- `build_ms`
+- `upload_ms`
+- `list_ms`
+- `delete_ms`
+- `total_ms`
+
+`backup metrics` 记录内存调试字段：
 
 | 阶段 | 字段 |
 |------|------|
