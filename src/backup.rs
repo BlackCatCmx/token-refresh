@@ -158,10 +158,18 @@ struct MemSample {
 }
 
 impl MemSample {
-    fn fmt_rss(&self) -> String { format_optional_u64(self.rss_kb) }
-    fn fmt_cg(&self) -> String { format_optional_u64(self.cg_kb) }
-    fn fmt_anon(&self) -> String { format_optional_u64(self.cg_anon_kb) }
-    fn fmt_file(&self) -> String { format_optional_u64(self.cg_file_kb) }
+    fn fmt_rss(&self) -> String {
+        format_optional_u64(self.rss_kb)
+    }
+    fn fmt_cg(&self) -> String {
+        format_optional_u64(self.cg_kb)
+    }
+    fn fmt_anon(&self) -> String {
+        format_optional_u64(self.cg_anon_kb)
+    }
+    fn fmt_file(&self) -> String {
+        format_optional_u64(self.cg_file_kb)
+    }
 }
 
 impl BackupCoordinator {
@@ -483,7 +491,10 @@ impl BackupCoordinator {
             }
             mem_after_delete = mem_sample();
             delete_elapsed_ms = Some(delete_started_at.elapsed().as_millis());
-            trim_summary = SnapshotTrimSummary { listed_count, deleted_count };
+            trim_summary = SnapshotTrimSummary {
+                listed_count,
+                deleted_count,
+            };
 
             drop(upload_file);
             drop(archive_file);
@@ -965,11 +976,14 @@ fn parse_cgroup_stat_pair(content: &str, key_a: &str, key_b: &str) -> (Option<u6
     for line in content.lines() {
         let mut parts = line.split_whitespace();
         if let Some(key) = parts.next() {
-            let val = || parts.next().and_then(|v| v.parse::<u64>().ok()).map(|v| v / 1024);
+            let value = parts
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|v| v / 1024);
             if key == key_a && a.is_none() {
-                a = val();
+                a = value;
             } else if key == key_b && b.is_none() {
-                b = val();
+                b = value;
             }
         }
         if a.is_some() && b.is_some() {
