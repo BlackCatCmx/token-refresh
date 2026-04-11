@@ -51,15 +51,16 @@ network:
 
 backup:
   enabled: false
-  remote:
-    type: "s3_compatible"
-    endpoint: ""
-    region: ""
-    bucket: ""
-    object_prefix: "token-refresh"
-    access_key_id: ""
-    secret_access_key: ""
-    path_style: true
+  remotes:
+    - name: "primary"
+      type: "s3_compatible"
+      endpoint: ""
+      region: ""
+      bucket: ""
+      object_prefix: "token-refresh"
+      access_key_id: ""
+      secret_access_key: ""
+      path_style: true
   schedule:
     daily_utc_enabled: true
     after_refresh_enabled: true

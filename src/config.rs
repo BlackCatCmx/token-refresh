@@ -200,7 +200,7 @@ pub struct BackupConfig {
     #[serde(default = "default_backup_enabled")]
     pub enabled: bool,
     #[serde(default)]
-    pub remote: BackupRemoteConfig,
+    pub remotes: Vec<BackupRemoteConfig>,
     #[serde(default)]
     pub schedule: BackupScheduleConfig,
 }
@@ -209,14 +209,25 @@ impl Default for BackupConfig {
     fn default() -> Self {
         Self {
             enabled: default_backup_enabled(),
-            remote: BackupRemoteConfig::default(),
+            remotes: Vec::new(),
             schedule: BackupScheduleConfig::default(),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl BackupConfig {
+    pub fn configured_remotes(&self) -> Vec<&BackupRemoteConfig> {
+        self.remotes
+            .iter()
+            .filter(|remote| remote.is_configured())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupRemoteConfig {
+    #[serde(default)]
+    pub name: String,
     #[serde(rename = "type", default = "default_backup_remote_type")]
     pub kind: String,
     #[serde(default)]
@@ -238,6 +249,7 @@ pub struct BackupRemoteConfig {
 impl Default for BackupRemoteConfig {
     fn default() -> Self {
         Self {
+            name: String::new(),
             kind: default_backup_remote_type(),
             endpoint: String::new(),
             region: default_backup_region(),
@@ -247,6 +259,36 @@ impl Default for BackupRemoteConfig {
             secret_access_key: String::new(),
             path_style: default_backup_path_style(),
         }
+    }
+}
+
+impl BackupRemoteConfig {
+    pub fn display_name(&self, index: usize) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        format!("备份端{}", index + 1)
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.kind.trim() == "s3_compatible"
+            && !self.endpoint.trim().is_empty()
+            && !self.bucket.trim().is_empty()
+            && !self.access_key_id.trim().is_empty()
+            && !self.secret_access_key.trim().is_empty()
+    }
+
+    pub fn is_blank(&self) -> bool {
+        self.name.trim().is_empty()
+            && self.endpoint.trim().is_empty()
+            && self.region.trim().is_empty()
+            && self.bucket.trim().is_empty()
+            && self.access_key_id.trim().is_empty()
+            && self.secret_access_key.trim().is_empty()
+            && self.kind.trim() == default_backup_remote_type()
+            && self.object_prefix.trim() == default_backup_object_prefix()
+            && self.path_style == default_backup_path_style()
     }
 }
 
@@ -675,29 +717,8 @@ fn diff_editable_settings(current: &EditableSettings, incoming: &EditableSetting
     if current.backup.enabled != incoming.backup.enabled {
         changed.push("backup.enabled".to_string());
     }
-    if current.backup.remote.kind != incoming.backup.remote.kind {
-        changed.push("backup.remote.type".to_string());
-    }
-    if current.backup.remote.endpoint != incoming.backup.remote.endpoint {
-        changed.push("backup.remote.endpoint".to_string());
-    }
-    if current.backup.remote.region != incoming.backup.remote.region {
-        changed.push("backup.remote.region".to_string());
-    }
-    if current.backup.remote.bucket != incoming.backup.remote.bucket {
-        changed.push("backup.remote.bucket".to_string());
-    }
-    if current.backup.remote.object_prefix != incoming.backup.remote.object_prefix {
-        changed.push("backup.remote.object_prefix".to_string());
-    }
-    if current.backup.remote.access_key_id != incoming.backup.remote.access_key_id {
-        changed.push("backup.remote.access_key_id".to_string());
-    }
-    if current.backup.remote.secret_access_key != incoming.backup.remote.secret_access_key {
-        changed.push("backup.remote.secret_access_key".to_string());
-    }
-    if current.backup.remote.path_style != incoming.backup.remote.path_style {
-        changed.push("backup.remote.path_style".to_string());
+    if current.backup.remotes != incoming.backup.remotes {
+        changed.push("backup.remotes".to_string());
     }
     if current.backup.schedule.daily_utc_enabled != incoming.backup.schedule.daily_utc_enabled {
         changed.push("backup.schedule.daily_utc_enabled".to_string());
@@ -830,31 +851,41 @@ fn default_timeout() -> String {
 }
 
 fn validate_backup_config(config: &BackupConfig) -> Result<()> {
-    let kind = config.remote.kind.trim();
-    if kind != "s3_compatible" {
-        bail!("backup.remote.type must be s3_compatible");
-    }
     parse_duration_str(&config.schedule.after_refresh_debounce)?;
     parse_duration_str(&config.schedule.min_interval_between_auto_backups)?;
     if !config.enabled {
         return Ok(());
     }
-    if config.remote.endpoint.trim().is_empty() {
-        bail!("backup.remote.endpoint is required when backup.enabled=true");
+    let mut configured_count = 0_usize;
+    let mut names = BTreeSet::new();
+    for (index, remote) in config.remotes.iter().enumerate() {
+        let remote_path = format!("backup.remotes[{index}]");
+        let kind = remote.kind.trim();
+        if kind != "s3_compatible" {
+            bail!("{remote_path}.type must be s3_compatible");
+        }
+        if remote.is_blank() {
+            continue;
+        }
+        if !remote.is_configured() {
+            bail!("{remote_path} is incomplete");
+        }
+        configured_count += 1;
+        if remote.name.trim().is_empty() {
+            bail!("{remote_path}.name is required when backup.enabled=true");
+        }
+        let endpoint = reqwest::Url::parse(remote.endpoint.trim())
+            .with_context(|| format!("invalid {remote_path}.endpoint: {}", remote.endpoint))?;
+        if !matches!(endpoint.scheme(), "http" | "https") {
+            bail!("{remote_path}.endpoint must use http or https");
+        }
+        let remote_name = remote.name.trim();
+        if !names.insert(remote_name.to_string()) {
+            bail!("backup.remotes contains duplicate name: {remote_name}");
+        }
     }
-    let endpoint = reqwest::Url::parse(config.remote.endpoint.trim())
-        .with_context(|| format!("invalid backup.remote.endpoint: {}", config.remote.endpoint))?;
-    if !matches!(endpoint.scheme(), "http" | "https") {
-        bail!("backup.remote.endpoint must use http or https");
-    }
-    if config.remote.bucket.trim().is_empty() {
-        bail!("backup.remote.bucket is required when backup.enabled=true");
-    }
-    if config.remote.access_key_id.trim().is_empty() {
-        bail!("backup.remote.access_key_id is required when backup.enabled=true");
-    }
-    if config.remote.secret_access_key.trim().is_empty() {
-        bail!("backup.remote.secret_access_key is required when backup.enabled=true");
+    if configured_count == 0 {
+        bail!("backup.remotes must contain at least one complete remote when backup.enabled=true");
     }
     Ok(())
 }
@@ -979,5 +1010,76 @@ mod tests {
         let mut config = AppConfig::default();
         config.credential_management.credential_page_size = 0;
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_config_allows_incomplete_backup_remote_when_disabled() {
+        let mut config = AppConfig::default();
+        config.backup.remotes = vec![BackupRemoteConfig {
+            name: "primary".to_string(),
+            ..BackupRemoteConfig::default()
+        }];
+
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_config_accepts_multiple_backup_remotes() {
+        let mut config = AppConfig::default();
+        config.backup.enabled = true;
+        config.backup.remotes = vec![
+            BackupRemoteConfig {
+                name: "primary".to_string(),
+                endpoint: "https://primary.example.com".to_string(),
+                bucket: "bucket-a".to_string(),
+                access_key_id: "key-a".to_string(),
+                secret_access_key: "secret-a".to_string(),
+                ..BackupRemoteConfig::default()
+            },
+            BackupRemoteConfig {
+                name: "secondary".to_string(),
+                endpoint: "https://secondary.example.com".to_string(),
+                bucket: "bucket-b".to_string(),
+                access_key_id: "key-b".to_string(),
+                secret_access_key: "secret-b".to_string(),
+                ..BackupRemoteConfig::default()
+            },
+        ];
+
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_config_rejects_duplicate_backup_remote_names() {
+        let mut config = AppConfig::default();
+        config.backup.enabled = true;
+        config.backup.remotes = vec![
+            BackupRemoteConfig {
+                name: "same".to_string(),
+                endpoint: "https://primary.example.com".to_string(),
+                bucket: "bucket-a".to_string(),
+                access_key_id: "key-a".to_string(),
+                secret_access_key: "secret-a".to_string(),
+                ..BackupRemoteConfig::default()
+            },
+            BackupRemoteConfig {
+                name: "same".to_string(),
+                endpoint: "https://secondary.example.com".to_string(),
+                bucket: "bucket-b".to_string(),
+                access_key_id: "key-b".to_string(),
+                secret_access_key: "secret-b".to_string(),
+                ..BackupRemoteConfig::default()
+            },
+        ];
+
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn config_example_is_valid() {
+        let config: AppConfig = serde_yaml::from_str(include_str!("../config.example.yaml"))
+            .expect("config.example.yaml should parse");
+
+        assert!(validate_config(&config).is_ok());
     }
 }

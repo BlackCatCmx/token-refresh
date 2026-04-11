@@ -2,6 +2,8 @@ let schedulerPollTimer = null;
 let schedulerManualActive = false;
 let backupStatusCache = null;
 let credPageSize = 50;
+let backupRemoteDrafts = [];
+let backupRemotesLocked = false;
 const credState = {
   normal: { page: 1, data: [], selected: new Set() },
   abnormal: { page: 1, data: [], selected: new Set() },
@@ -37,9 +39,9 @@ async function api(url, options = {}) {
 
 async function refreshAll() {
   await loadSettings();
+  await loadBackupStatus();
   await Promise.all([
     loadScheduler(),
-    loadBackupStatus(),
     loadCpaConfig(),
     loadCpaStatus(),
     loadCredentials("normal"),
@@ -48,6 +50,34 @@ async function refreshAll() {
     reloadLog("audit"),
     reloadCpaLog(),
   ]);
+}
+
+function createEmptyBackupRemote() {
+  return {
+    name: "",
+    type: "s3_compatible",
+    endpoint: "",
+    region: "",
+    bucket: "",
+    object_prefix: "token-refresh",
+    access_key_id: "",
+    secret_access_key: "",
+    path_style: true,
+  };
+}
+
+function normalizeBackupRemote(remote = {}) {
+  return {
+    name: remote.name || "",
+    type: remote.type || "s3_compatible",
+    endpoint: remote.endpoint || "",
+    region: remote.region || "",
+    bucket: remote.bucket || "",
+    object_prefix: remote.object_prefix || "token-refresh",
+    access_key_id: remote.access_key_id || "",
+    secret_access_key: remote.secret_access_key || "",
+    path_style: remote.path_style !== false,
+  };
 }
 
 async function loadScheduler() {
@@ -59,6 +89,10 @@ async function loadScheduler() {
   const manualSummary = `成功 ${data.manual_success_count ?? 0} / 失败 ${data.manual_failed_count ?? 0}`;
   const manualLastItemError = data.manual_last_item_error
     ? `${data.manual_last_item_error_key || "未知账号"}: ${data.manual_last_item_error}`
+    : "无";
+  const latestBackupRemote = backupStatusCache?.latest_remote_name || "无";
+  const latestBackupSnapshot = backupStatusCache?.last_snapshot_key
+    ? backupStatusCache.last_snapshot_key.split("/").pop()
     : "无";
   container.innerHTML = `
     <span class="status-label">自动刷新</span>
@@ -87,6 +121,10 @@ async function loadScheduler() {
     <span${data.manual_last_item_error ? ' class="danger-text"' : ""}>${escapeHtml(manualLastItemError)}</span>
     <span class="status-label">手动流程异常</span>
     <span${data.manual_last_run_error ? ' class="danger-text"' : ""}>${escapeHtml(data.manual_last_run_error || "无")}</span>
+    <span class="status-label">最新备份端</span>
+    <span>${escapeHtml(latestBackupRemote)}</span>
+    <span class="status-label">最新备份快照</span>
+    <span>${escapeHtml(latestBackupSnapshot)}</span>
   `;
   const manualBtn = document.getElementById("manual-refresh-all-btn");
   const manualBusy = Boolean(data.manual_pending || data.manual_running);
@@ -126,9 +164,10 @@ async function loadBackupStatus() {
 
   const items = [
     ["💾", "备份",  data.enabled    ? v("开启", "status-on")   : v("关闭",   "status-off")],
-    ["☁️",  "远端",  data.configured ? v("就绪", "status-on")   : v("未完成", "danger-text")],
+    ["☁️",  "远端",  data.configured ? v(`就绪 (${data.configured_remote_count || 0})`, "status-on")   : v("未完成", "danger-text")],
     ["⚡",  "状态",  runState],
     ["🕐", "成功",  data.last_success_at ? shortTime(data.last_success_at) : v("无", "status-off")],
+    ["🧭", "最新端", data.latest_remote_name ? escapeHtml(data.latest_remote_name) : v("无", "status-off")],
     ["📅", "日备",  formatDailyBackupStatus(data)],
     ["🔄", "刷新后", formatAfterRefreshBackupStatus(data)],
     ["📤", "待传",  data.dirty_pending ? v("有", "status-warn") : v("无", "status-off")],
@@ -219,6 +258,121 @@ function shortTime(rfc3339) {
   return d.toLocaleString("zh-CN", { hour12: false });
 }
 
+function escapeAttr(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function renderBackupRemoteEditors() {
+  const container = document.getElementById("backup-remotes-container");
+  if (!container) return;
+  if (!backupRemoteDrafts.length) {
+    container.innerHTML = `<div class="empty-hint">当前没有备份端，点击“新增备份端”后再保存。</div>`;
+    return;
+  }
+  container.innerHTML = backupRemoteDrafts.map((remote, index) => `
+    <div class="backup-remote-card">
+      <div class="backup-remote-card-header">
+        <div class="backup-remote-card-title">${escapeHtml(remote.name || `备份端 ${index + 1}`)}</div>
+        <div class="toolbar backup-remote-card-actions">
+          <button type="button" class="secondary" onclick="moveBackupRemote(${index}, -1)" ${backupRemotesLocked || index === 0 ? "disabled" : ""}>上移</button>
+          <button type="button" class="secondary" onclick="moveBackupRemote(${index}, 1)" ${backupRemotesLocked || index === backupRemoteDrafts.length - 1 ? "disabled" : ""}>下移</button>
+          <button type="button" class="danger" onclick="removeBackupRemote(${index})" ${backupRemotesLocked ? "disabled" : ""}>删除</button>
+        </div>
+      </div>
+      <div class="grid">
+        <div>
+          <label>名称</label>
+          <input type="text" data-remote-index="${index}" data-field="name" value="${escapeAttr(remote.name)}" ${backupRemotesLocked ? "disabled" : ""}>
+        </div>
+        <div>
+          <label>远端类型</label>
+          <select data-remote-index="${index}" data-field="type" ${backupRemotesLocked ? "disabled" : ""}>
+            <option value="s3_compatible" ${remote.type === "s3_compatible" ? "selected" : ""}>s3_compatible</option>
+          </select>
+        </div>
+        <div>
+          <label>S3 Endpoint</label>
+          <input type="text" data-remote-index="${index}" data-field="endpoint" placeholder="https://example.com" value="${escapeAttr(remote.endpoint)}" ${backupRemotesLocked ? "disabled" : ""}>
+        </div>
+        <div>
+          <label>Bucket</label>
+          <input type="text" data-remote-index="${index}" data-field="bucket" value="${escapeAttr(remote.bucket)}" ${backupRemotesLocked ? "disabled" : ""}>
+        </div>
+        <div>
+          <label>Access Key ID</label>
+          <input type="text" data-remote-index="${index}" data-field="access_key_id" value="${escapeAttr(remote.access_key_id)}" ${backupRemotesLocked ? "disabled" : ""}>
+        </div>
+        <div>
+          <label>Secret Access Key</label>
+          <input type="password" data-remote-index="${index}" data-field="secret_access_key" autocomplete="new-password" value="${escapeAttr(remote.secret_access_key)}" ${backupRemotesLocked ? "disabled" : ""}>
+        </div>
+        <details class="field-expand grid-full">
+          <summary>高级选项</summary>
+          <div class="grid advanced-grid">
+            <div>
+              <label>Region</label>
+              <input type="text" data-remote-index="${index}" data-field="region" placeholder="留空自动识别，失败时回退到 us-east-1" value="${escapeAttr(remote.region)}" ${backupRemotesLocked ? "disabled" : ""}>
+            </div>
+            <div>
+              <label>备份目录前缀</label>
+              <input type="text" data-remote-index="${index}" data-field="object_prefix" placeholder="留空则直接写到 snapshots/" value="${escapeAttr(remote.object_prefix)}" ${backupRemotesLocked ? "disabled" : ""}>
+            </div>
+            <div>
+              <label>Path-style</label>
+              <select data-remote-index="${index}" data-field="path_style" ${backupRemotesLocked ? "disabled" : ""}>
+                <option value="true" ${remote.path_style ? "selected" : ""}>true</option>
+                <option value="false" ${remote.path_style ? "" : "selected"}>false</option>
+              </select>
+            </div>
+          </div>
+          <div class="muted advanced-hint">Claw Cloud 建议保留 <code>Path-style=true</code>。Region 留空时会优先从 Endpoint 自动识别。</div>
+        </details>
+      </div>
+    </div>
+  `).join("");
+}
+
+function collectBackupRemoteInputs() {
+  return Array.from(document.querySelectorAll("#backup-remotes-container .backup-remote-card")).map((_, index) => {
+    const getValue = (field) => document.querySelector(`[data-remote-index="${index}"][data-field="${field}"]`)?.value ?? "";
+    return {
+      name: getValue("name").trim(),
+      type: getValue("type"),
+      endpoint: getValue("endpoint").trim(),
+      region: getValue("region").trim(),
+      bucket: getValue("bucket").trim(),
+      object_prefix: getValue("object_prefix").trim(),
+      access_key_id: getValue("access_key_id").trim(),
+      secret_access_key: getValue("secret_access_key"),
+      path_style: getValue("path_style") === "true",
+    };
+  });
+}
+
+function addBackupRemote() {
+  backupRemoteDrafts = [...collectBackupRemoteInputs(), createEmptyBackupRemote()];
+  renderBackupRemoteEditors();
+}
+
+function removeBackupRemote(index) {
+  backupRemoteDrafts = collectBackupRemoteInputs().filter((_, current) => current !== index);
+  renderBackupRemoteEditors();
+}
+
+function moveBackupRemote(index, delta) {
+  const nextIndex = index + delta;
+  if (nextIndex < 0 || nextIndex >= backupRemoteDrafts.length) return;
+  const next = collectBackupRemoteInputs();
+  const [item] = next.splice(index, 1);
+  next.splice(nextIndex, 0, item);
+  backupRemoteDrafts = next;
+  renderBackupRemoteEditors();
+}
+
 async function schedulerAction(action) {
   await api(`api/scheduler/${action}`, { method: "POST" });
   await loadScheduler();
@@ -262,14 +416,7 @@ async function loadSettings(rerenderCredentials = false) {
   document.getElementById("failure-backoff").value = data.settings.refresh.failure_backoff;
   document.getElementById("network-timeout").value = data.settings.network.timeout;
   document.getElementById("backup-enabled").value = String(data.settings.backup.enabled);
-  document.getElementById("backup-remote-type").value = data.settings.backup.remote.type;
-  document.getElementById("backup-endpoint").value = data.settings.backup.remote.endpoint;
-  document.getElementById("backup-region").value = data.settings.backup.remote.region;
-  document.getElementById("backup-bucket").value = data.settings.backup.remote.bucket;
-  document.getElementById("backup-prefix").value = data.settings.backup.remote.object_prefix;
-  document.getElementById("backup-access-key-id").value = data.settings.backup.remote.access_key_id;
-  document.getElementById("backup-secret-access-key").value = data.settings.backup.remote.secret_access_key;
-  document.getElementById("backup-path-style").value = String(data.settings.backup.remote.path_style);
+  backupRemoteDrafts = (data.settings.backup.remotes || []).map(normalizeBackupRemote);
   document.getElementById("backup-daily-enabled").value = String(data.settings.backup.schedule.daily_utc_enabled);
   document.getElementById("backup-after-refresh-enabled").value = String(data.settings.backup.schedule.after_refresh_enabled);
   document.getElementById("backup-after-refresh-debounce").value = data.settings.backup.schedule.after_refresh_debounce;
@@ -277,9 +424,12 @@ async function loadSettings(rerenderCredentials = false) {
   syncUserAgentMode();
   renderHeaderPreview(data.header_preview);
   document.getElementById("settings-meta").textContent = `配置文件: ${data.config_path} | 环境变量锁定项: ${data.locked_fields.join(", ") || "无"}`;
-  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "credential-page-size", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout", "backup-enabled", "backup-remote-type", "backup-endpoint", "backup-region", "backup-bucket", "backup-prefix", "backup-access-key-id", "backup-secret-access-key", "backup-path-style", "backup-daily-enabled", "backup-after-refresh-enabled", "backup-after-refresh-debounce", "backup-min-auto-interval"]) {
+  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "credential-page-size", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout", "backup-enabled", "backup-daily-enabled", "backup-after-refresh-enabled", "backup-after-refresh-debounce", "backup-min-auto-interval"]) {
     document.getElementById(field).disabled = false;
   }
+  backupRemotesLocked = false;
+  document.getElementById("backup-remote-add-btn").disabled = false;
+  renderBackupRemoteEditors();
   const lockMap = {
     "request_identity.originator": ["originator"],
     "request_identity.user_agent_mode": ["user-agent-mode"],
@@ -303,14 +453,7 @@ async function loadSettings(rerenderCredentials = false) {
     "refresh.failure_backoff": ["failure-backoff"],
     "network.timeout": ["network-timeout"],
     "backup.enabled": ["backup-enabled"],
-    "backup.remote.type": ["backup-remote-type"],
-    "backup.remote.endpoint": ["backup-endpoint"],
-    "backup.remote.region": ["backup-region"],
-    "backup.remote.bucket": ["backup-bucket"],
-    "backup.remote.object_prefix": ["backup-prefix"],
-    "backup.remote.access_key_id": ["backup-access-key-id"],
-    "backup.remote.secret_access_key": ["backup-secret-access-key"],
-    "backup.remote.path_style": ["backup-path-style"],
+    "backup.remotes": ["backup-remote-add-btn"],
     "backup.schedule.daily_utc_enabled": ["backup-daily-enabled"],
     "backup.schedule.after_refresh_enabled": ["backup-after-refresh-enabled"],
     "backup.schedule.after_refresh_debounce": ["backup-after-refresh-debounce"],
@@ -321,6 +464,8 @@ async function loadSettings(rerenderCredentials = false) {
       document.getElementById(fieldId).disabled = true;
     }
   }
+  backupRemotesLocked = data.locked_fields.includes("backup.remotes");
+  renderBackupRemoteEditors();
 }
 
 function renderHeaderPreview(value) {
@@ -388,16 +533,7 @@ async function saveSettings() {
       },
       backup: {
         enabled: document.getElementById("backup-enabled").value === "true",
-        remote: {
-          type: document.getElementById("backup-remote-type").value,
-          endpoint: document.getElementById("backup-endpoint").value,
-          region: document.getElementById("backup-region").value.trim(),
-          bucket: document.getElementById("backup-bucket").value,
-          object_prefix: document.getElementById("backup-prefix").value.trim(),
-          access_key_id: document.getElementById("backup-access-key-id").value,
-          secret_access_key: document.getElementById("backup-secret-access-key").value,
-          path_style: document.getElementById("backup-path-style").value === "true",
-        },
+        remotes: collectBackupRemoteInputs(),
         schedule: {
           daily_utc_enabled: document.getElementById("backup-daily-enabled").value === "true",
           after_refresh_enabled: document.getElementById("backup-after-refresh-enabled").value === "true",
@@ -729,31 +865,43 @@ function downloadCredentialArchive(zone) {
 
 const backupRestoreState = {
   snapshots: [],
-  selectedKey: null,
+  selectedIndex: null,
 };
 
 async function runBackupNow() {
   const data = await api("api/backup/run", { method: "POST" });
   await loadBackupStatus();
-  showToast(`备份完成：${data.snapshot?.key || "远端快照已更新"}`);
+  await loadScheduler();
+  const remoteLabel = data.snapshot?.remote_name ? `${data.snapshot.remote_name} / ` : "";
+  showToast(`备份完成：${remoteLabel}${data.snapshot?.key || "远端快照已更新"}`);
 }
 
 async function openBackupRestoreModal() {
   try {
     const data = await api("api/backup/snapshots");
     backupRestoreState.snapshots = data.items || [];
-    backupRestoreState.selectedKey = backupRestoreState.snapshots[0]?.key || null;
+    backupRestoreState.selectedIndex = backupRestoreState.snapshots.length ? 0 : null;
     const list = document.getElementById("backup-restore-list");
+    const warnings = document.getElementById("backup-restore-warnings");
+    const warningItems = data.warnings || [];
+    if (warningItems.length) {
+      warnings.classList.remove("hidden");
+      warnings.innerHTML = warningItems.map((item) => `<div>${escapeHtml(item)}</div>`).join("");
+    } else {
+      warnings.classList.add("hidden");
+      warnings.innerHTML = "";
+    }
     if (backupRestoreState.snapshots.length === 0) {
       list.innerHTML = `<div class="empty-hint">远端没有可用备份</div>`;
     } else {
       list.innerHTML = backupRestoreState.snapshots.map((item, index) => `
         <div class="backup-snapshot-item">
           <label>
-            <input type="radio" name="backup-snapshot" value="${escapeHtml(item.key)}" ${index === 0 ? "checked" : ""} onchange="selectBackupSnapshot(this.value)">
+            <input type="radio" name="backup-snapshot" value="${index}" ${index === 0 ? "checked" : ""} onchange="selectBackupSnapshot(${index})">
             <span class="backup-snapshot-meta">
               <span>${escapeHtml(item.key)}</span>
               <span class="muted">时间：${escapeHtml(item.created_at ? shortTime(item.created_at) : item.last_modified ? shortTime(item.last_modified) : "未知")}</span>
+              <span class="muted">来源：${escapeHtml(item.remote_name || "未标记")}${item.is_current_latest ? " | 当前最新" : ""}</span>
               <span class="muted">触发：${escapeHtml(item.trigger || "unknown")} | 大小：${escapeHtml(formatBytes(item.size || 0))}</span>
             </span>
           </label>
@@ -773,27 +921,31 @@ async function openBackupRestoreModal() {
 
 function closeBackupRestoreModal() {
   backupRestoreState.snapshots = [];
-  backupRestoreState.selectedKey = null;
+  backupRestoreState.selectedIndex = null;
   document.getElementById("backup-restore-confirmation").value = "";
+  const warnings = document.getElementById("backup-restore-warnings");
+  warnings.classList.add("hidden");
+  warnings.innerHTML = "";
   const modal = document.getElementById("backup-restore-modal");
   modal.classList.add("hidden");
   modal.setAttribute("aria-hidden", "true");
   document.body.classList.remove("modal-open");
 }
 
-function selectBackupSnapshot(value) {
-  backupRestoreState.selectedKey = value;
+function selectBackupSnapshot(index) {
+  backupRestoreState.selectedIndex = Number(index);
   syncBackupRestoreConfirm();
 }
 
 function syncBackupRestoreConfirm() {
-  const enabled = backupRestoreState.selectedKey
+  const enabled = Number.isInteger(backupRestoreState.selectedIndex)
     && document.getElementById("backup-restore-confirmation").value.trim() === "确定还原";
   document.getElementById("backup-restore-submit").disabled = !enabled;
 }
 
 async function submitBackupRestore() {
-  if (!backupRestoreState.selectedKey) {
+  const selected = backupRestoreState.snapshots[backupRestoreState.selectedIndex];
+  if (!selected) {
     alert("请选择一个备份");
     return;
   }
@@ -806,7 +958,8 @@ async function submitBackupRestore() {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      snapshot_key: backupRestoreState.selectedKey,
+      remote_name: selected.remote_name,
+      snapshot_key: selected.key,
       confirmation,
     }),
   });
@@ -1119,6 +1272,9 @@ window.schedulerAction = schedulerAction;
 window.triggerManualRefreshAll = triggerManualRefreshAll;
 window.saveSettings = saveSettings;
 window.syncUserAgentMode = syncUserAgentMode;
+window.addBackupRemote = addBackupRemote;
+window.removeBackupRemote = removeBackupRemote;
+window.moveBackupRemote = moveBackupRemote;
 window.manualRefresh = manualRefresh;
 window.restoreCredential = restoreCredential;
 window.deleteCredential = deleteCredential;

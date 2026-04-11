@@ -322,6 +322,53 @@ select:disabled, input:disabled, textarea:disabled {
 /* Full-width cell inside grid (for textareas) */
 .grid .grid-full { grid-column: 1 / -1; }
 
+.backup-remotes-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.backup-remotes-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.backup-remotes-title {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.backup-remotes-list {
+  display: grid;
+  gap: 12px;
+}
+
+.backup-remote-card {
+  background: #f8fafc;
+  border: 1px solid #dbe4f0;
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.backup-remote-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.backup-remote-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.backup-remote-card-actions {
+  margin-bottom: 0;
+}
+
 /* ── Credential Cards ── */
 .cred-grid {
   display: grid;
@@ -548,6 +595,18 @@ select:disabled, input:disabled, textarea:disabled {
 .backup-confirm-input {
   width: 100%;
   margin-top: 8px;
+}
+
+.backup-restore-warnings {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 13px;
 }
 
 /* ── Toast ── */
@@ -928,4 +987,9 @@ details.settings-group-collapsible > .grid { margin-top: 4px; }
   .modal-editor-layout { flex-direction: column; min-height: auto; }
   .modal-info-panel { width: 100%; }
   .modal-textarea { min-height: 50vh; }
+  .backup-remotes-header,
+  .backup-remote-card-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }

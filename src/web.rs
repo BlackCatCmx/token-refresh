@@ -152,7 +152,8 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         scheduler.clone(),
         logger.clone(),
         write_coordinator.clone(),
-    ));
+        config.state_dir.join("backup_state.json"),
+    )?);
     let cpa_log = Arc::new(CpaLog::new(&config.state_dir)?);
     let cpa_config = Arc::new(CpaConfigStore::load(&config.state_dir)?);
     let cpa_manager = Arc::new(CpaManager::new(

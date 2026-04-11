@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{fmt, fmt::Formatter};
@@ -12,6 +15,7 @@ use tokio::sync::{Notify, RwLock};
 use crate::backup_archive::{self, RestoredSnapshot};
 use crate::config::{BackupConfig, BackupRemoteConfig, ConfigManager, parse_duration_str};
 use crate::credential_store::CredentialStore;
+use crate::fsutil;
 use crate::logging::LogManager;
 use crate::s3_compatible::{RemoteSnapshot, S3CompatibleClient};
 use crate::scheduler::SchedulerHandle;
@@ -22,15 +26,26 @@ use crate::write_coordinator::WriteCoordinator;
 pub struct BackupStatus {
     pub enabled: bool,
     pub configured: bool,
+    pub configured_remote_count: usize,
     pub after_refresh_enabled: bool,
     pub running: bool,
     pub restore_running: bool,
     pub dirty_pending: bool,
     pub last_success_at: Option<String>,
     pub last_snapshot_key: Option<String>,
+    pub latest_remote_name: Option<String>,
+    pub active_remote_name: Option<String>,
     pub last_error: Option<String>,
     pub next_daily_at: Option<String>,
     pub next_after_refresh_at: Option<String>,
+}
+
+const BACKUP_OPERATION_BUSY_MESSAGE: &str = "当前已有备份任务在执行，请稍后再试";
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct SnapshotListResult {
+    pub items: Vec<RemoteSnapshot>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -52,6 +67,7 @@ struct BackupRuntime {
     scheduler: SchedulerHandle,
     logger: Arc<LogManager>,
     write_coordinator: Arc<WriteCoordinator>,
+    state_store: Arc<BackupStateStore>,
     notify: Notify,
     status: RwLock<BackupStatus>,
     dirty_since: RwLock<Option<DateTime<Utc>>>,
@@ -59,7 +75,7 @@ struct BackupRuntime {
     last_daily_backup_for: RwLock<Option<NaiveDate>>,
     last_after_refresh_failure_dirty_since: RwLock<Option<DateTime<Utc>>>,
     last_daily_failure_for: RwLock<Option<NaiveDate>>,
-    s3_client: RwLock<Option<CachedS3Client>>,
+    s3_clients: RwLock<BTreeMap<String, CachedS3Client>>,
     busy: AtomicBool,
 }
 
@@ -67,6 +83,61 @@ struct BackupRuntime {
 struct CachedS3Client {
     key: BackupRemoteCacheKey,
     client: Arc<S3CompatibleClient>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct BackupPersistedState {
+    last_success_at: Option<String>,
+    last_snapshot_key: Option<String>,
+    latest_remote_name: Option<String>,
+}
+
+#[derive(Debug)]
+struct BackupStateStore {
+    path: PathBuf,
+    state: Mutex<BackupPersistedState>,
+}
+
+impl BackupStateStore {
+    fn load(path: PathBuf) -> Result<Self> {
+        let state = match fsutil::read_file_if_exists(&path)? {
+            Some(raw) if raw.is_empty() => BackupPersistedState::default(),
+            Some(raw) => serde_json::from_slice::<BackupPersistedState>(&raw)
+                .with_context(|| format!("invalid backup state file {}", path.display()))?,
+            None => BackupPersistedState::default(),
+        };
+        Ok(Self {
+            path,
+            state: Mutex::new(state),
+        })
+    }
+
+    fn get(&self) -> Result<BackupPersistedState> {
+        self.state
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|_| anyhow::anyhow!("backup state lock poisoned"))
+    }
+
+    fn set_latest(
+        &self,
+        last_success_at: Option<String>,
+        last_snapshot_key: Option<String>,
+        latest_remote_name: Option<String>,
+    ) -> Result<()> {
+        let next = BackupPersistedState {
+            last_success_at,
+            last_snapshot_key,
+            latest_remote_name,
+        };
+        fsutil::atomic_write_json(&self.path, &next)?;
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("backup state lock poisoned"))?;
+        *guard = next;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -182,8 +253,11 @@ impl BackupCoordinator {
         scheduler: SchedulerHandle,
         logger: Arc<LogManager>,
         write_coordinator: Arc<WriteCoordinator>,
-    ) -> Self {
-        Self {
+        state_path: PathBuf,
+    ) -> Result<Self> {
+        let state_store = Arc::new(BackupStateStore::load(state_path)?);
+        let persisted = state_store.get()?;
+        Ok(Self {
             inner: Arc::new(BackupRuntime {
                 config_manager,
                 store,
@@ -191,17 +265,23 @@ impl BackupCoordinator {
                 scheduler,
                 logger,
                 write_coordinator,
+                state_store,
                 notify: Notify::new(),
-                status: RwLock::new(BackupStatus::default()),
+                status: RwLock::new(BackupStatus {
+                    last_success_at: persisted.last_success_at,
+                    last_snapshot_key: persisted.last_snapshot_key,
+                    latest_remote_name: persisted.latest_remote_name,
+                    ..BackupStatus::default()
+                }),
                 dirty_since: RwLock::new(None),
                 last_auto_backup_at: RwLock::new(None),
                 last_daily_backup_for: RwLock::new(None),
                 last_after_refresh_failure_dirty_since: RwLock::new(None),
                 last_daily_failure_for: RwLock::new(None),
-                s3_client: RwLock::new(None),
+                s3_clients: RwLock::new(BTreeMap::new()),
                 busy: AtomicBool::new(false),
             }),
-        }
+        })
     }
 
     pub fn spawn_background(&self) {
@@ -260,47 +340,101 @@ impl BackupCoordinator {
         result
     }
 
-    pub async fn list_snapshots(&self) -> Result<Vec<RemoteSnapshot>> {
+    pub async fn list_snapshots(&self) -> Result<SnapshotListResult> {
         let started_at = Instant::now();
         let rss_before_kb = process_rss_kb();
         let config = self.inner.config_manager.effective_config().await;
+        self.sync_cached_s3_clients(&config.backup).await;
         let backup = ensure_backup_ready(&config.backup)?;
-        let (client, cache_status) = self.cached_s3_client(&backup.remote).await?;
-        let result = client.list_snapshots().await;
-        let rss_after_kb = process_rss_kb();
-        match &result {
-            Ok(items) => {
-                let _ = self.inner.logger.runtime(
-                    "info",
-                    format!(
-                        "backup snapshots listed count={} cache={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
-                        items.len(),
-                        cache_status.as_str(),
-                        format_optional_u64(rss_before_kb),
-                        format_optional_u64(rss_after_kb),
-                        started_at.elapsed().as_millis(),
-                    ),
-                );
-            }
-            Err(err) => {
-                let _ = self.inner.logger.runtime(
-                    "error",
-                    format!(
-                        "backup snapshots listing failed cache={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
-                        cache_status.as_str(),
-                        format_optional_u64(rss_before_kb),
-                        format_optional_u64(rss_after_kb),
-                        started_at.elapsed().as_millis(),
-                    ),
-                );
+        let persisted = self.inner.state_store.get()?;
+        let mut items = Vec::new();
+        let mut warnings = Vec::new();
+        let mut success_count = 0_usize;
+        for (index, remote) in backup.configured_remotes().into_iter().enumerate() {
+            let remote_name = remote.display_name(index);
+            let (client, cache_status) = match self.cached_s3_client(remote).await {
+                Ok(value) => value,
+                Err(err) => {
+                    warnings.push(format!("{remote_name}: {err}"));
+                    let _ = self.inner.logger.runtime(
+                        "error",
+                        format!(
+                            "backup snapshots client init failed remote={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                            remote_name,
+                            format_optional_u64(rss_before_kb),
+                            format_optional_u64(process_rss_kb()),
+                            started_at.elapsed().as_millis(),
+                        ),
+                    );
+                    continue;
+                }
+            };
+            match client.list_snapshots().await {
+                Ok(mut remote_items) => {
+                    success_count += 1;
+                    let remote_count = remote_items.len();
+                    for item in &mut remote_items {
+                        item.remote_name = Some(remote_name.clone());
+                        item.is_current_latest = persisted.latest_remote_name.as_deref()
+                            == Some(remote_name.as_str())
+                            && persisted.last_snapshot_key.as_deref() == Some(item.key.as_str());
+                    }
+                    items.extend(remote_items);
+                    let _ = self.inner.logger.runtime(
+                        "info",
+                        format!(
+                            "backup snapshots listed remote={} count={} cache={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                            remote_name,
+                            remote_count,
+                            cache_status.as_str(),
+                            format_optional_u64(rss_before_kb),
+                            format_optional_u64(process_rss_kb()),
+                            started_at.elapsed().as_millis(),
+                        ),
+                    );
+                }
+                Err(err) => {
+                    warnings.push(format!("{remote_name}: {err}"));
+                    let _ = self.inner.logger.runtime(
+                        "error",
+                        format!(
+                            "backup snapshots listing failed remote={} cache={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                            remote_name,
+                            cache_status.as_str(),
+                            format_optional_u64(rss_before_kb),
+                            format_optional_u64(process_rss_kb()),
+                            started_at.elapsed().as_millis(),
+                        ),
+                    );
+                }
             }
         }
-        result
+        items.sort_by(compare_remote_snapshots_desc);
+        let rss_after_kb = process_rss_kb();
+        if should_fail_snapshot_listing(success_count, warnings.len()) {
+            bail!("所有备份端读取失败：{}", warnings.join(" | "));
+        }
+        let _ = self.inner.logger.runtime(
+            "info",
+            format!(
+                "backup snapshots merged count={} warnings={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                items.len(),
+                warnings.len(),
+                format_optional_u64(rss_before_kb),
+                format_optional_u64(rss_after_kb),
+                started_at.elapsed().as_millis(),
+            ),
+        );
+        Ok(SnapshotListResult { items, warnings })
     }
 
-    pub async fn restore_snapshot(&self, snapshot_key: &str) -> Result<RestoreResult> {
+    pub async fn restore_snapshot(
+        &self,
+        remote_name: &str,
+        snapshot_key: &str,
+    ) -> Result<RestoreResult> {
         self.begin_backup_operation(true).await?;
-        let result = self.restore_snapshot_inner(snapshot_key).await;
+        let result = self.restore_snapshot_inner(remote_name, snapshot_key).await;
         self.finish_backup_operation(true, &result).await;
         result
     }
@@ -325,7 +459,9 @@ impl BackupCoordinator {
 
     async fn background_tick(&self) -> Result<()> {
         let config = self.inner.config_manager.effective_config().await;
-        let configured = is_backup_remote_configured(&config.backup);
+        self.sync_cached_s3_clients(&config.backup).await;
+        let configured_remote_count = config.backup.configured_remotes().len();
+        let configured = configured_remote_count > 0;
         let now = Utc::now();
         let dirty_since = *self.inner.dirty_since.read().await;
         let last_daily_backup_for = *self.inner.last_daily_backup_for.read().await;
@@ -360,6 +496,7 @@ impl BackupCoordinator {
             let mut status = self.inner.status.write().await;
             status.enabled = config.backup.enabled;
             status.configured = configured;
+            status.configured_remote_count = configured_remote_count;
             status.after_refresh_enabled = config.backup.schedule.after_refresh_enabled;
             status.next_daily_at = next_daily_at.map(|value| value.to_rfc3339());
             status.next_after_refresh_at = next_after_refresh_at.map(|value| value.to_rfc3339());
@@ -378,8 +515,7 @@ impl BackupCoordinator {
             last_daily_failure_for,
             now,
         ) {
-            if !self.inner.busy.load(Ordering::SeqCst) {
-                self.begin_backup_operation(false).await?;
+            if self.try_begin_backup_operation(false).await? {
                 let result = self.run_backup_once(BackupTrigger::Daily).await;
                 self.finish_backup_operation(false, &result).await;
                 result?;
@@ -388,8 +524,7 @@ impl BackupCoordinator {
         }
 
         if self.should_run_after_refresh(&config.backup, now).await? {
-            if !self.inner.busy.load(Ordering::SeqCst) {
-                self.begin_backup_operation(false).await?;
+            if self.try_begin_backup_operation(false).await? {
                 let result = self.run_backup_once(BackupTrigger::AfterRefresh).await;
                 self.finish_backup_operation(false, &result).await;
                 result?;
@@ -406,19 +541,27 @@ impl BackupCoordinator {
     }
 
     async fn begin_backup_operation(&self, restore: bool) -> Result<()> {
+        if self.try_begin_backup_operation(restore).await? {
+            return Ok(());
+        }
+        bail!(BACKUP_OPERATION_BUSY_MESSAGE);
+    }
+
+    async fn try_begin_backup_operation(&self, restore: bool) -> Result<bool> {
         if self
             .inner
             .busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            bail!("当前已有备份任务在执行，请稍后再试");
+            return Ok(false);
         }
         let mut status = self.inner.status.write().await;
         status.running = !restore;
         status.restore_running = restore;
+        status.active_remote_name = None;
         status.last_error = None;
-        Ok(())
+        Ok(true)
     }
 
     async fn finish_backup_operation<T>(&self, _restore: bool, result: &Result<T>) {
@@ -426,6 +569,7 @@ impl BackupCoordinator {
         let mut status = self.inner.status.write().await;
         status.running = false;
         status.restore_running = false;
+        status.active_remote_name = None;
         if let Err(err) = result {
             status.last_error = Some(err.to_string());
         }
@@ -451,6 +595,7 @@ impl BackupCoordinator {
         );
 
         let mut cache_status = None;
+        let mut selected_remote_name = None::<String>;
         let mut snapshot_key_for_log: Option<String> = None;
         let mut archive_size_bytes = None;
         let mut rss_after_archive_kb = None;
@@ -463,15 +608,13 @@ impl BackupCoordinator {
         let mut list_elapsed_ms = None;
         let mut delete_elapsed_ms = None;
         let mut trim_summary = SnapshotTrimSummary::default();
+        let mut fail_summaries = Vec::new();
 
         let result = async {
             let config = self.inner.config_manager.effective_config().await;
+            self.sync_cached_s3_clients(&config.backup).await;
             let backup = ensure_backup_ready(&config.backup)?;
-            let (client, status) = self.cached_s3_client(&backup.remote).await?;
-            cache_status = Some(status);
             let created_at = Utc::now();
-            let snapshot_key = build_snapshot_key(&client, trigger, created_at);
-            snapshot_key_for_log = Some(snapshot_key.clone());
             let temp_dir = config.state_dir.join("tmp");
             std::fs::create_dir_all(&temp_dir)
                 .with_context(|| format!("failed to create {}", temp_dir.display()))?;
@@ -505,81 +648,156 @@ impl BackupCoordinator {
             rss_after_archive_kb = process_rss_kb();
             build_elapsed_ms = Some(started_at.elapsed().as_millis());
 
-            let upload_started_at = Instant::now();
-            let mut upload_handle = archive_file
-                .reopen()
-                .context("failed to reopen temporary snapshot archive")?;
-            upload_handle
-                .seek(SeekFrom::Start(0))
-                .context("failed to rewind temporary snapshot archive")?;
-            let mut upload_file = tokio::fs::File::from_std(upload_handle);
-            client
-                .put_object_stream(&snapshot_key, &mut upload_file)
-                .await?;
-            mem_after_upload = mem_sample();
-            upload_elapsed_ms = Some(upload_started_at.elapsed().as_millis());
+            for (index, remote) in backup.configured_remotes().into_iter().enumerate() {
+                let remote_name = remote.display_name(index);
+                {
+                    let mut status = self.inner.status.write().await;
+                    status.active_remote_name = Some(remote_name.clone());
+                }
+                let (client, status) = match self.cached_s3_client(remote).await {
+                    Ok(value) => value,
+                    Err(err) => {
+                        fail_summaries.push(format!("{remote_name}: {err}"));
+                        let _ = self.inner.logger.runtime(
+                            "error",
+                            format!(
+                                "backup attempt failed trigger={} remote={} endpoint={} bucket={} prefix={} err={err:#}",
+                                trigger.as_str(),
+                                remote_name,
+                                display_config_value(remote.endpoint.trim()),
+                                display_config_value(remote.bucket.trim()),
+                                display_config_value(remote.object_prefix.trim()),
+                            ),
+                        );
+                        continue;
+                    }
+                };
+                cache_status = Some(status);
+                selected_remote_name = Some(remote_name.clone());
+                let snapshot_key = build_snapshot_key(&client, trigger, created_at);
+                snapshot_key_for_log = Some(snapshot_key.clone());
+                let _ = self.inner.logger.runtime(
+                    "info",
+                    format!(
+                        "backup attempt started trigger={} remote={} key={} cache={} endpoint={} bucket={} prefix={}",
+                        trigger.as_str(),
+                        remote_name,
+                        snapshot_key,
+                        status.as_str(),
+                        display_config_value(remote.endpoint.trim()),
+                        display_config_value(remote.bucket.trim()),
+                        display_config_value(remote.object_prefix.trim()),
+                    ),
+                );
 
-            let list_started_at = Instant::now();
-            let snapshots = client.list_snapshots().await?;
-            let listed_count = snapshots.len();
-            mem_after_list = mem_sample();
-            list_elapsed_ms = Some(list_started_at.elapsed().as_millis());
+                let attempt = async {
+                    let upload_started_at = Instant::now();
+                    let mut upload_handle = archive_file
+                        .reopen()
+                        .context("failed to reopen temporary snapshot archive")?;
+                    upload_handle
+                        .seek(SeekFrom::Start(0))
+                        .context("failed to rewind temporary snapshot archive")?;
+                    let mut upload_file = tokio::fs::File::from_std(upload_handle);
+                    client
+                        .put_object_stream(&snapshot_key, &mut upload_file)
+                        .await?;
+                    mem_after_upload = mem_sample();
+                    upload_elapsed_ms = Some(upload_started_at.elapsed().as_millis());
 
-            let delete_started_at = Instant::now();
-            let mut deleted_count = 0;
-            for snapshot in snapshots.into_iter().skip(1) {
-                client.delete_object(&snapshot.key).await?;
-                deleted_count += 1;
-            }
-            mem_after_delete = mem_sample();
-            delete_elapsed_ms = Some(delete_started_at.elapsed().as_millis());
-            trim_summary = SnapshotTrimSummary {
-                listed_count,
-                deleted_count,
-            };
+                    let list_started_at = Instant::now();
+                    let snapshots = client.list_snapshots().await?;
+                    let listed_count = snapshots.len();
+                    mem_after_list = mem_sample();
+                    list_elapsed_ms = Some(list_started_at.elapsed().as_millis());
 
-            drop(upload_file);
-            drop(archive_file);
-            mem_after_drop = mem_sample_full();
-            {
-                let mut status = self.inner.status.write().await;
-                status.last_success_at = Some(created_at.to_rfc3339());
-                status.last_snapshot_key = Some(snapshot_key.clone());
-                status.last_error = None;
-                status.dirty_pending = false;
-                status.next_after_refresh_at = None;
+                    let delete_started_at = Instant::now();
+                    let mut deleted_count = 0;
+                    for snapshot in snapshots.into_iter().skip(1) {
+                        client.delete_object(&snapshot.key).await?;
+                        deleted_count += 1;
+                    }
+                    mem_after_delete = mem_sample();
+                    delete_elapsed_ms = Some(delete_started_at.elapsed().as_millis());
+                    trim_summary = SnapshotTrimSummary {
+                        listed_count,
+                        deleted_count,
+                    };
+
+                    drop(upload_file);
+                    mem_after_drop = mem_sample_full();
+                    self.inner.state_store.set_latest(
+                        Some(created_at.to_rfc3339()),
+                        Some(snapshot_key.clone()),
+                        Some(remote_name.clone()),
+                    )?;
+                    {
+                        let mut status = self.inner.status.write().await;
+                        status.last_success_at = Some(created_at.to_rfc3339());
+                        status.last_snapshot_key = Some(snapshot_key.clone());
+                        status.latest_remote_name = Some(remote_name.clone());
+                        status.last_error = None;
+                        status.dirty_pending = false;
+                        status.next_after_refresh_at = None;
+                    }
+                    {
+                        let mut dirty_since = self.inner.dirty_since.write().await;
+                        *dirty_since = None;
+                    }
+                    {
+                        let mut last_after_refresh_failure = self
+                            .inner
+                            .last_after_refresh_failure_dirty_since
+                            .write()
+                            .await;
+                        *last_after_refresh_failure = None;
+                    }
+                    if matches!(trigger, BackupTrigger::Daily | BackupTrigger::AfterRefresh) {
+                        let mut last_auto = self.inner.last_auto_backup_at.write().await;
+                        *last_auto = Some(created_at);
+                    }
+                    if matches!(trigger, BackupTrigger::Daily) {
+                        let mut last_daily = self.inner.last_daily_backup_for.write().await;
+                        *last_daily = Some(created_at.date_naive());
+                        let mut last_daily_failure = self.inner.last_daily_failure_for.write().await;
+                        *last_daily_failure = None;
+                    }
+                    let (created_at_display, trigger_display) =
+                        crate::s3_compatible::parse_snapshot_name_for_display(&snapshot_key);
+                    Ok::<RemoteSnapshot, anyhow::Error>(RemoteSnapshot {
+                        key: snapshot_key.clone(),
+                        size: archive_size,
+                        last_modified: Some(created_at.to_rfc3339()),
+                        created_at: created_at_display,
+                        trigger: trigger_display,
+                        remote_name: Some(remote_name.clone()),
+                        is_current_latest: true,
+                    })
+                }
+                .await;
+
+                match attempt {
+                    Ok(snapshot) => return Ok(snapshot),
+                    Err(err) => {
+                        fail_summaries.push(format!("{remote_name}: {err}"));
+                        let _ = self.inner.logger.runtime(
+                            "error",
+                            format!(
+                                "backup attempt failed trigger={} remote={} key={} cache={} endpoint={} bucket={} prefix={} err={err:#}",
+                                trigger.as_str(),
+                                remote_name,
+                                snapshot_key,
+                                status.as_str(),
+                                display_config_value(remote.endpoint.trim()),
+                                display_config_value(remote.bucket.trim()),
+                                display_config_value(remote.object_prefix.trim()),
+                            ),
+                        );
+                    }
+                }
             }
-            {
-                let mut dirty_since = self.inner.dirty_since.write().await;
-                *dirty_since = None;
-            }
-            {
-                let mut last_after_refresh_failure = self
-                    .inner
-                    .last_after_refresh_failure_dirty_since
-                    .write()
-                    .await;
-                *last_after_refresh_failure = None;
-            }
-            if matches!(trigger, BackupTrigger::Daily | BackupTrigger::AfterRefresh) {
-                let mut last_auto = self.inner.last_auto_backup_at.write().await;
-                *last_auto = Some(created_at);
-            }
-            if matches!(trigger, BackupTrigger::Daily) {
-                let mut last_daily = self.inner.last_daily_backup_for.write().await;
-                *last_daily = Some(created_at.date_naive());
-                let mut last_daily_failure = self.inner.last_daily_failure_for.write().await;
-                *last_daily_failure = None;
-            }
-            let (created_at_display, trigger_display) =
-                crate::s3_compatible::parse_snapshot_name_for_display(&snapshot_key);
-            Ok(RemoteSnapshot {
-                key: snapshot_key,
-                size: archive_size,
-                last_modified: Some(created_at.to_rfc3339()),
-                created_at: created_at_display,
-                trigger: trigger_display,
-            })
+
+            bail!("所有备份端均失败：{}", fail_summaries.join(" | "))
         }
         .await;
 
@@ -587,6 +805,7 @@ impl BackupCoordinator {
         let cache_status = cache_status
             .map(|value| value.as_str())
             .unwrap_or("unknown");
+        let remote_name = selected_remote_name.as_deref().unwrap_or("-");
         let snapshot_key = snapshot_key_for_log.as_deref().unwrap_or("-");
         let archive_size_bytes = archive_size_bytes
             .map(|value| value.to_string())
@@ -597,8 +816,9 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "info",
                     format!(
-                        "backup finished trigger={} key={} cache={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={}",
+                        "backup finished trigger={} remote={} key={} cache={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={}",
                         trigger.as_str(),
+                        remote_name,
                         snapshot.key,
                         cache_status,
                         archive_size_bytes,
@@ -654,8 +874,9 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "error",
                     format!(
-                        "backup failed trigger={} key={} cache={} rss_before_kb={} cg_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} rss_final_kb={} cg_final_kb={} cg_anon_final_kb={} cg_file_final_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={} err={err:#}",
+                        "backup failed trigger={} remote={} key={} cache={} rss_before_kb={} cg_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} rss_final_kb={} cg_final_kb={} cg_anon_final_kb={} cg_file_final_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={} err={err:#}",
                         trigger.as_str(),
+                        remote_name,
                         snapshot_key,
                         cache_status,
                         mem_before.fmt_rss(),
@@ -682,7 +903,11 @@ impl BackupCoordinator {
         result
     }
 
-    async fn restore_snapshot_inner(&self, snapshot_key: &str) -> Result<RestoreResult> {
+    async fn restore_snapshot_inner(
+        &self,
+        remote_name: &str,
+        snapshot_key: &str,
+    ) -> Result<RestoreResult> {
         let started_at = Instant::now();
         let rss_before_kb = process_rss_kb();
         let scheduler_status = self.inner.scheduler.status().await;
@@ -695,8 +920,15 @@ impl BackupCoordinator {
         let mut manifest_abnormal_count = None;
         let result = async {
             let config = self.inner.config_manager.effective_config().await;
+            self.sync_cached_s3_clients(&config.backup).await;
             let backup = ensure_backup_ready(&config.backup)?;
-            let (client, status) = self.cached_s3_client(&backup.remote).await?;
+            let remote = find_backup_remote(backup, remote_name)
+                .ok_or_else(|| anyhow::anyhow!("未找到名为 {remote_name} 的备份端"))?;
+            {
+                let mut status = self.inner.status.write().await;
+                status.active_remote_name = Some(remote_name.to_string());
+            }
+            let (client, status) = self.cached_s3_client(remote).await?;
             cache_status = Some(status);
             let _activity_guard = self.inner.write_coordinator.lock_activity().await;
             let freeze_guard = self.inner.write_coordinator.begin_restore()?;
@@ -735,7 +967,8 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "info",
                     format!(
-                        "backup restore completed snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} restored_normal_count={} restored_abnormal_count={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                        "backup restore completed remote={} snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} restored_normal_count={} restored_abnormal_count={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                        remote_name,
                         snapshot_key,
                         cache_status,
                         format_optional_usize(downloaded_bytes),
@@ -753,7 +986,8 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "error",
                     format!(
-                        "backup restore failed snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                        "backup restore failed remote={} snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                        remote_name,
                         snapshot_key,
                         cache_status,
                         format_optional_usize(downloaded_bytes),
@@ -786,12 +1020,8 @@ impl BackupCoordinator {
             .last_after_refresh_failure_dirty_since
             .read()
             .await;
-        let Some(due_at) = compute_after_refresh_due_at(
-            backup,
-            dirty_since,
-            last_auto,
-            last_failed_dirty_since,
-        )?
+        let Some(due_at) =
+            compute_after_refresh_due_at(backup, dirty_since, last_auto, last_failed_dirty_since)?
         else {
             return Ok(false);
         };
@@ -804,14 +1034,12 @@ impl BackupCoordinator {
         now: DateTime<Utc>,
     ) -> Result<Duration> {
         let mut candidates = Vec::new();
-        if let Some(next_daily_at) =
-            compute_next_daily_at(
-                backup,
-                *self.inner.last_daily_backup_for.read().await,
-                *self.inner.last_daily_failure_for.read().await,
-                now,
-            )
-        {
+        if let Some(next_daily_at) = compute_next_daily_at(
+            backup,
+            *self.inner.last_daily_backup_for.read().await,
+            *self.inner.last_daily_failure_for.read().await,
+            now,
+        ) {
             let wait = (next_daily_at - now)
                 .to_std()
                 .unwrap_or_else(|_| Duration::from_secs(1));
@@ -824,12 +1052,9 @@ impl BackupCoordinator {
             .last_after_refresh_failure_dirty_since
             .read()
             .await;
-        if let Some(due_at) = compute_after_refresh_due_at(
-            backup,
-            dirty_since,
-            last_auto,
-            last_failed_dirty_since,
-        )? {
+        if let Some(due_at) =
+            compute_after_refresh_due_at(backup, dirty_since, last_auto, last_failed_dirty_since)?
+        {
             let wait = (due_at - now)
                 .to_std()
                 .unwrap_or_else(|_| Duration::from_secs(1));
@@ -847,9 +1072,10 @@ impl BackupCoordinator {
         remote: &BackupRemoteConfig,
     ) -> Result<(Arc<S3CompatibleClient>, S3ClientCacheStatus)> {
         let key = BackupRemoteCacheKey::from_remote_config(remote);
+        let cache_name = remote_cache_name(remote);
         {
-            let guard = self.inner.s3_client.read().await;
-            if let Some(cached) = guard.as_ref()
+            let guard = self.inner.s3_clients.read().await;
+            if let Some(cached) = guard.get(&cache_name)
                 && cached.key == key
             {
                 return Ok((Arc::clone(&cached.client), S3ClientCacheStatus::Hit));
@@ -857,27 +1083,31 @@ impl BackupCoordinator {
         }
 
         let client = Arc::new(S3CompatibleClient::new(remote)?);
-        let mut guard = self.inner.s3_client.write().await;
-        if let Some(cached) = guard.as_ref()
+        let mut guard = self.inner.s3_clients.write().await;
+        if let Some(cached) = guard.get(&cache_name)
             && cached.key == key
         {
             return Ok((Arc::clone(&cached.client), S3ClientCacheStatus::Hit));
         }
 
-        let cache_status = if guard.is_some() {
+        let cache_status = if guard.contains_key(&cache_name) {
             S3ClientCacheStatus::Refreshed
         } else {
             S3ClientCacheStatus::Created
         };
-        *guard = Some(CachedS3Client {
-            key: key.clone(),
-            client: Arc::clone(&client),
-        });
+        guard.insert(
+            cache_name.clone(),
+            CachedS3Client {
+                key: key.clone(),
+                client: Arc::clone(&client),
+            },
+        );
         let _ = self.inner.logger.runtime(
             "info",
             format!(
-                "backup s3 client cache {} endpoint={} bucket={} prefix={} region={} path_style={}",
+                "backup s3 client cache {} remote={} endpoint={} bucket={} prefix={} region={} path_style={}",
                 cache_status.as_str(),
+                cache_name,
                 display_config_value(&key.endpoint),
                 display_config_value(&key.bucket),
                 display_config_value(&key.object_prefix),
@@ -887,24 +1117,89 @@ impl BackupCoordinator {
         );
         Ok((client, cache_status))
     }
+
+    async fn sync_cached_s3_clients(&self, backup: &BackupConfig) {
+        let active_names: std::collections::BTreeSet<String> = backup
+            .configured_remotes()
+            .into_iter()
+            .map(remote_cache_name)
+            .collect();
+        let mut guard = self.inner.s3_clients.write().await;
+        let removed: Vec<String> = guard
+            .keys()
+            .filter(|name| !active_names.contains(*name))
+            .cloned()
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        guard.retain(|name, _| active_names.contains(name));
+        drop(guard);
+        let _ = self.inner.logger.runtime(
+            "info",
+            format!(
+                "backup s3 client cache pruned removed={} names={}",
+                removed.len(),
+                removed.join(",")
+            ),
+        );
+    }
 }
 
 fn ensure_backup_ready(backup: &BackupConfig) -> Result<&BackupConfig> {
     if !backup.enabled {
         bail!("备份功能未启用");
     }
-    if !is_backup_remote_configured(backup) {
-        bail!("备份远端配置不完整，请先在设置页补全");
+    if backup.configured_remotes().is_empty() {
+        bail!("备份远端配置不完整，请先在设置页补全至少一个备份端");
     }
     Ok(backup)
 }
 
-fn is_backup_remote_configured(backup: &BackupConfig) -> bool {
-    backup.remote.kind.trim() == "s3_compatible"
-        && !backup.remote.endpoint.trim().is_empty()
-        && !backup.remote.bucket.trim().is_empty()
-        && !backup.remote.access_key_id.trim().is_empty()
-        && !backup.remote.secret_access_key.trim().is_empty()
+fn find_backup_remote<'a>(
+    backup: &'a BackupConfig,
+    remote_name: &str,
+) -> Option<&'a BackupRemoteConfig> {
+    let target = remote_name.trim();
+    backup
+        .remotes
+        .iter()
+        .enumerate()
+        .find(|(index, remote)| remote.is_configured() && remote.display_name(*index) == target)
+        .map(|(_, remote)| remote)
+}
+
+fn remote_cache_name(remote: &BackupRemoteConfig) -> String {
+    let name = remote.name.trim();
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    if !remote.endpoint.trim().is_empty() {
+        return remote.endpoint.trim().trim_end_matches('/').to_string();
+    }
+    "unnamed-backup-remote".to_string()
+}
+
+fn compare_remote_snapshots_desc(
+    left: &RemoteSnapshot,
+    right: &RemoteSnapshot,
+) -> std::cmp::Ordering {
+    snapshot_sort_key(right)
+        .cmp(&snapshot_sort_key(left))
+        .then_with(|| left.remote_name.cmp(&right.remote_name))
+        .then_with(|| left.key.cmp(&right.key))
+}
+
+fn should_fail_snapshot_listing(success_count: usize, warning_count: usize) -> bool {
+    success_count == 0 && warning_count > 0
+}
+
+fn snapshot_sort_key(snapshot: &RemoteSnapshot) -> String {
+    snapshot
+        .created_at
+        .clone()
+        .or_else(|| snapshot.last_modified.clone())
+        .unwrap_or_else(|| snapshot.key.clone())
 }
 
 fn should_run_daily(
@@ -1153,15 +1448,14 @@ mod tests {
         let dirty_since = Utc.with_ymd_and_hms(2026, 4, 6, 15, 38, 1).unwrap();
         let last_auto_backup_at = Utc.with_ymd_and_hms(2026, 4, 6, 11, 54, 41).unwrap();
 
-        let due_at =
-            compute_after_refresh_due_at(
-                &backup,
-                Some(dirty_since),
-                Some(last_auto_backup_at),
-                None,
-            )
-                .unwrap()
-                .unwrap();
+        let due_at = compute_after_refresh_due_at(
+            &backup,
+            Some(dirty_since),
+            Some(last_auto_backup_at),
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(
             due_at,
@@ -1193,6 +1487,7 @@ mod tests {
     #[test]
     fn remote_cache_key_normalizes_remote_config_values() {
         let key = BackupRemoteCacheKey::from_remote_config(&BackupRemoteConfig {
+            name: "primary".to_string(),
             kind: " s3_compatible ".to_string(),
             endpoint: " https://example.com/ ".to_string(),
             region: " us-east-1 ".to_string(),
@@ -1228,6 +1523,14 @@ mod tests {
             BackupRemoteCacheKey::from_remote_config(&first),
             BackupRemoteCacheKey::from_remote_config(&second)
         );
+    }
+
+    #[test]
+    fn snapshot_listing_failure_requires_all_remotes_to_fail() {
+        assert!(!should_fail_snapshot_listing(1, 1));
+        assert!(!should_fail_snapshot_listing(1, 0));
+        assert!(!should_fail_snapshot_listing(0, 0));
+        assert!(should_fail_snapshot_listing(0, 1));
     }
 
     #[cfg(target_os = "linux")]

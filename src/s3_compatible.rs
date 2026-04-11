@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use s3::Bucket;
 use s3::creds::Credentials;
+use s3::error::S3Error;
 use s3::region::Region;
+use s3::request::ResponseData;
 use tokio::io::AsyncRead;
 
 use crate::config::BackupRemoteConfig;
@@ -20,6 +22,10 @@ pub struct RemoteSnapshot {
     pub last_modified: Option<String>,
     pub created_at: Option<String>,
     pub trigger: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_name: Option<String>,
+    #[serde(default)]
+    pub is_current_latest: bool,
 }
 
 impl S3CompatibleClient {
@@ -59,7 +65,7 @@ impl S3CompatibleClient {
             .bucket
             .put_object_stream(reader, object_path)
             .await
-            .context("failed to upload backup object")?;
+            .map_err(|err| describe_s3_error("上传备份", err))?;
         ensure_status(response.status_code(), &[200, 201], "上传备份")?;
         Ok(())
     }
@@ -69,8 +75,9 @@ impl S3CompatibleClient {
             .bucket
             .get_object(object_path(key))
             .await
+            .map_err(|err| describe_s3_error("下载备份", err))
             .with_context(|| format!("failed to download backup object {key}"))?;
-        ensure_status(response.status_code(), &[200], "下载备份")?;
+        ensure_response_status(&response, &[200], "下载备份")?;
         Ok(response.bytes().to_vec())
     }
 
@@ -79,8 +86,9 @@ impl S3CompatibleClient {
             .bucket
             .delete_object(object_path(key))
             .await
+            .map_err(|err| describe_s3_error("删除旧备份", err))
             .with_context(|| format!("failed to delete backup object {key}"))?;
-        ensure_status(response.status_code(), &[200, 204, 404], "删除旧备份")?;
+        ensure_response_status(&response, &[200, 204, 404], "删除旧备份")?;
         Ok(())
     }
 
@@ -90,6 +98,7 @@ impl S3CompatibleClient {
             .bucket
             .list(prefix.clone(), None)
             .await
+            .map_err(|err| describe_s3_error("列出备份", err))
             .context("failed to list backup snapshots")?;
         let mut snapshots = Vec::new();
         for page in results {
@@ -104,6 +113,8 @@ impl S3CompatibleClient {
                     last_modified: normalize_timestamp(&object.last_modified),
                     created_at,
                     trigger,
+                    remote_name: None,
+                    is_current_latest: false,
                 });
             }
         }
@@ -187,6 +198,100 @@ fn ensure_status(status: u16, expected: &[u16], action: &str) -> Result<()> {
     }
 }
 
+fn ensure_response_status(response: &ResponseData, expected: &[u16], action: &str) -> Result<()> {
+    let status = response.status_code();
+    if expected.contains(&status) {
+        return Ok(());
+    }
+    bail!(
+        "{}",
+        describe_http_failure(
+            action,
+            status,
+            Some(response.as_slice()),
+            Some(&response.headers())
+        )
+    )
+}
+
+fn describe_s3_error(action: &str, err: S3Error) -> anyhow::Error {
+    match err {
+        S3Error::HttpFailWithBody(status, body) => {
+            anyhow::anyhow!(
+                "{}",
+                describe_http_failure(action, status, Some(body.as_bytes()), None)
+            )
+        }
+        other => anyhow::anyhow!("{action}失败：{other}"),
+    }
+}
+
+fn describe_http_failure(
+    action: &str,
+    status: u16,
+    body: Option<&[u8]>,
+    headers: Option<&std::collections::HashMap<String, String>>,
+) -> String {
+    let body_text = body
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .unwrap_or_default();
+    let aws_code = extract_xml_tag(body_text, "Code");
+    let aws_message = extract_xml_tag(body_text, "Message");
+    let request_id = extract_xml_tag(body_text, "RequestId").or_else(|| {
+        headers.and_then(|values| get_header_case_insensitive(values, "x-amz-request-id"))
+    });
+    let host_id = extract_xml_tag(body_text, "HostId")
+        .or_else(|| headers.and_then(|values| get_header_case_insensitive(values, "x-amz-id-2")));
+    let body_preview = compact_body_preview(body_text);
+    let mut parts = vec![format!("{action}失败，远端返回 HTTP {status}")];
+    if let Some(value) = aws_code {
+        parts.push(format!("aws_code={value}"));
+    }
+    if let Some(value) = aws_message {
+        parts.push(format!("aws_message={value}"));
+    }
+    if let Some(value) = request_id {
+        parts.push(format!("request_id={value}"));
+    }
+    if let Some(value) = host_id {
+        parts.push(format!("host_id={value}"));
+    }
+    if !body_preview.is_empty() {
+        parts.push(format!("body={body_preview}"));
+    }
+    parts.join(" ")
+}
+
+fn extract_xml_tag(body: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body.find(&open)? + open.len();
+    let end = body[start..].find(&close)? + start;
+    Some(body[start..end].trim().to_string()).filter(|value| !value.is_empty())
+}
+
+fn get_header_case_insensitive(
+    headers: &std::collections::HashMap<String, String>,
+    target: &str,
+) -> Option<String> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(target))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn compact_body_preview(body: &str) -> String {
+    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let preview: String = chars.by_ref().take(240).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
 fn normalize_timestamp(value: &str) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
@@ -208,8 +313,10 @@ fn parse_snapshot_name(key: &str) -> (Option<String>, String) {
         DateTime::parse_from_str(timestamp, "%Y%m%dT%H%M%SZ")
             .ok()
             .map(|value| value.with_timezone(&Utc).to_rfc3339())
-    } else if let Ok(value) = NaiveDateTime::parse_from_str(timestamp, "%Y%m%d") {
-        Some(Utc.from_utc_datetime(&value).to_rfc3339())
+    } else if let Ok(value) = NaiveDate::parse_from_str(timestamp, "%Y%m%d") {
+        value
+            .and_hms_opt(0, 0, 0)
+            .map(|value| Utc.from_utc_datetime(&value).to_rfc3339())
     } else {
         None
     };
@@ -245,5 +352,26 @@ mod tests {
             resolve_region("", "https://minio.internal.example.com"),
             "us-east-1"
         );
+    }
+
+    #[test]
+    fn describe_http_failure_includes_xml_details() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>XMinioStorageFull</Code><Message>Storage backend has reached its minimum free drive threshold.</Message><RequestId>abc123</RequestId><HostId>host456</HostId></Error>"#;
+
+        let message = describe_http_failure("上传备份", 507, Some(body), None);
+
+        assert!(message.contains("HTTP 507"));
+        assert!(message.contains("aws_code=XMinioStorageFull"));
+        assert!(message.contains("request_id=abc123"));
+        assert!(message.contains("host_id=host456"));
+    }
+
+    #[test]
+    fn parse_snapshot_name_supports_date_only_timestamp() {
+        let (created_at, trigger) =
+            parse_snapshot_name("snapshots/2026/04/11/snapshot-20260411-daily.zip");
+
+        assert_eq!(trigger, "daily");
+        assert_eq!(created_at.as_deref(), Some("2026-04-11T00:00:00+00:00"));
     }
 }

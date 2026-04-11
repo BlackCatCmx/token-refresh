@@ -768,7 +768,11 @@ async fn get_backup_status(State(state): State<Arc<AppState>>) -> Response {
 
 async fn list_backup_snapshots(State(state): State<Arc<AppState>>) -> Response {
     match state.backup.list_snapshots().await {
-        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Ok(result) => Json(serde_json::json!({
+            "items": result.items,
+            "warnings": result.warnings
+        }))
+        .into_response(),
         Err(err) => json_error(backup_error_status(&err), &err.to_string()),
     }
 }
@@ -782,6 +786,7 @@ async fn run_backup_now(State(state): State<Arc<AppState>>) -> Response {
 
 #[derive(Debug, Deserialize)]
 struct RestoreBackupRequest {
+    remote_name: String,
     snapshot_key: String,
     confirmation: String,
 }
@@ -795,7 +800,7 @@ async fn restore_from_backup(
     }
     match state
         .backup
-        .restore_snapshot(payload.snapshot_key.trim())
+        .restore_snapshot(payload.remote_name.trim(), payload.snapshot_key.trim())
         .await
     {
         Ok(RestoreResult {
@@ -1110,13 +1115,14 @@ async fn update_settings(
                 let _ = state.logger.runtime(
                     "info",
                     format!(
-                        "settings updated (log_level={}, max_file_size={}, proxy_mode={}, abnormal_threshold={}, timeout={}, backup_enabled={})",
+                        "settings updated (log_level={}, max_file_size={}, proxy_mode={}, abnormal_threshold={}, timeout={}, backup_enabled={}, backup_remote_count={})",
                         config.log_level.trim(),
                         config.logging.max_file_size.trim(),
                         config.proxy.mode.trim(),
                         config.credential_management.abnormal_threshold,
                         config.network.timeout.trim(),
-                        config.backup.enabled
+                        config.backup.enabled,
+                        config.backup.remotes.len(),
                     ),
                 );
                 state.backup.wake();
