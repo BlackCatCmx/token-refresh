@@ -143,18 +143,20 @@
           <div><label>巡查间隔（分钟）</label><input type="number" id="cpa-inspect-interval" min="1"></div>
         </div>
         <div class="sub-card-grid">
-          <div class="sub-card">
-            <h3 class="settings-group-title">安全保护</h3>
-            <div class="grid">
-              <label class="checkbox-row"><input type="checkbox" id="cpa-safety-abort-enabled"> 启用异常占比保护</label>
-              <div><label>占比阈值（%）</label><input type="number" id="cpa-safety-abort-ratio" min="1" max="100"></div>
+          <div class="sub-card sub-card--row">
+            <span class="sub-card-tag">安全保护</span>
+            <label class="checkbox-row"><input type="checkbox" id="cpa-safety-abort-enabled"> 启用异常占比保护</label>
+            <div class="sub-card-field">
+              <label for="cpa-safety-abort-ratio">占比阈值（%）</label>
+              <input type="number" id="cpa-safety-abort-ratio" min="1" max="100">
             </div>
           </div>
-          <div class="sub-card">
-            <h3 class="settings-group-title">自动补号</h3>
-            <div class="grid">
-              <label class="checkbox-row"><input type="checkbox" id="cpa-auto-supplement-enabled"> 开启自动补号</label>
-              <div><label>目标数量</label><input type="number" id="cpa-supplement-target" min="1"></div>
+          <div class="sub-card sub-card--row">
+            <span class="sub-card-tag">自动补号</span>
+            <label class="checkbox-row"><input type="checkbox" id="cpa-auto-supplement-enabled"> 开启自动补号</label>
+            <div class="sub-card-field">
+              <label for="cpa-supplement-target">目标数量</label>
+              <input type="number" id="cpa-supplement-target" min="1">
             </div>
           </div>
         </div>

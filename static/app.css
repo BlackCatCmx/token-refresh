@@ -742,6 +742,43 @@ pre {
   margin-top: 0;
 }
 
+/* Compact single-row sub-card */
+.sub-card--row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+}
+
+.sub-card-tag {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  white-space: nowrap;
+  padding-right: 10px;
+  border-right: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+
+.sub-card-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.sub-card-field label {
+  font-size: 13px;
+  color: #475569;
+}
+
+.sub-card-field input {
+  width: 72px;
+}
+
 .cred-pager {
   display: flex;
   align-items: center;
@@ -861,6 +898,21 @@ details.settings-group-collapsible > .grid { margin-top: 4px; }
   .cpa-tile--wide { grid-column: span 1; }
   .cpa-tile--full { grid-column: 1 / -1; }
   .cpa-conn-grid { grid-template-columns: 1fr; }
+  .sub-card--row { flex-wrap: wrap; align-items: flex-start; gap: 10px; }
+  .sub-card-tag {
+    width: 100%;
+    border-right: 0;
+    padding-right: 0;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .sub-card--row .checkbox-row { width: 100%; }
+  .sub-card-field {
+    margin-left: 0;
+    width: 100%;
+    justify-content: space-between;
+    white-space: normal;
+  }
 
   header, nav.tabs, main { padding-left: 16px; padding-right: 16px; }
   header {
