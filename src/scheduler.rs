@@ -393,7 +393,7 @@ impl SchedulerRuntime {
                 .await?;
             if outcome.success {
                 if let Some(backup) = &self.backup {
-                    backup.mark_dirty();
+                    backup.mark_dirty("scheduler_refresh_success");
                 }
             }
             self.update_backoff(&config, &outcome).await?;
@@ -490,7 +490,7 @@ impl SchedulerRuntime {
                     if outcome.success {
                         status.manual_success_count += 1;
                         if let Some(backup) = &self.backup {
-                            backup.mark_dirty();
+                            backup.mark_dirty("manual_batch_refresh_success");
                         }
                     } else {
                         status.manual_failed_count += 1;

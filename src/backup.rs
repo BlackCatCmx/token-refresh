@@ -57,6 +57,8 @@ struct BackupRuntime {
     dirty_since: RwLock<Option<DateTime<Utc>>>,
     last_auto_backup_at: RwLock<Option<DateTime<Utc>>>,
     last_daily_backup_for: RwLock<Option<NaiveDate>>,
+    last_after_refresh_failure_dirty_since: RwLock<Option<DateTime<Utc>>>,
+    last_daily_failure_for: RwLock<Option<NaiveDate>>,
     s3_client: RwLock<Option<CachedS3Client>>,
     busy: AtomicBool,
 }
@@ -194,6 +196,8 @@ impl BackupCoordinator {
                 dirty_since: RwLock::new(None),
                 last_auto_backup_at: RwLock::new(None),
                 last_daily_backup_for: RwLock::new(None),
+                last_after_refresh_failure_dirty_since: RwLock::new(None),
+                last_daily_failure_for: RwLock::new(None),
                 s3_client: RwLock::new(None),
                 busy: AtomicBool::new(false),
             }),
@@ -207,17 +211,36 @@ impl BackupCoordinator {
         });
     }
 
-    pub fn mark_dirty(&self) {
+    pub fn mark_dirty(&self, reason: &'static str) {
         let this = self.clone();
         tokio::spawn(async move {
+            let now = Utc::now();
             let mut dirty_since = this.inner.dirty_since.write().await;
+            let already_pending = dirty_since.is_some();
             if dirty_since.is_none() {
-                *dirty_since = Some(Utc::now());
+                *dirty_since = Some(now);
             }
+            let dirty_since_value = *dirty_since;
             drop(dirty_since);
+            let mut last_after_refresh_failure = this
+                .inner
+                .last_after_refresh_failure_dirty_since
+                .write()
+                .await;
+            *last_after_refresh_failure = None;
+            drop(last_after_refresh_failure);
             let mut status = this.inner.status.write().await;
             status.dirty_pending = true;
             drop(status);
+            let _ = this.inner.logger.runtime(
+                "info",
+                format!(
+                    "backup marked dirty reason={} dirty_since={} already_pending={}",
+                    reason,
+                    format_optional_datetime(dirty_since_value),
+                    already_pending,
+                ),
+            );
             this.inner.notify.notify_waiters();
         });
     }
@@ -306,14 +329,30 @@ impl BackupCoordinator {
         let now = Utc::now();
         let dirty_since = *self.inner.dirty_since.read().await;
         let last_daily_backup_for = *self.inner.last_daily_backup_for.read().await;
+        let last_daily_failure_for = *self.inner.last_daily_failure_for.read().await;
         let last_auto_backup_at = *self.inner.last_auto_backup_at.read().await;
+        let last_after_refresh_failure_dirty_since = *self
+            .inner
+            .last_after_refresh_failure_dirty_since
+            .read()
+            .await;
         let next_daily_at = if config.backup.enabled && configured {
-            compute_next_daily_at(&config.backup, last_daily_backup_for, now)
+            compute_next_daily_at(
+                &config.backup,
+                last_daily_backup_for,
+                last_daily_failure_for,
+                now,
+            )
         } else {
             None
         };
         let next_after_refresh_at = if config.backup.enabled && configured {
-            compute_after_refresh_due_at(&config.backup, dirty_since, last_auto_backup_at)?
+            compute_after_refresh_due_at(
+                &config.backup,
+                dirty_since,
+                last_auto_backup_at,
+                last_after_refresh_failure_dirty_since,
+            )?
         } else {
             None
         };
@@ -335,13 +374,15 @@ impl BackupCoordinator {
 
         if should_run_daily(
             &config.backup,
-            *self.inner.last_daily_backup_for.read().await,
+            last_daily_backup_for,
+            last_daily_failure_for,
             now,
         ) {
             if !self.inner.busy.load(Ordering::SeqCst) {
                 self.begin_backup_operation(false).await?;
                 let result = self.run_backup_once(BackupTrigger::Daily).await;
                 self.finish_backup_operation(false, &result).await;
+                result?;
                 return Ok(());
             }
         }
@@ -351,6 +392,7 @@ impl BackupCoordinator {
                 self.begin_backup_operation(false).await?;
                 let result = self.run_backup_once(BackupTrigger::AfterRefresh).await;
                 self.finish_backup_operation(false, &result).await;
+                result?;
                 return Ok(());
             }
         }
@@ -511,6 +553,14 @@ impl BackupCoordinator {
                 let mut dirty_since = self.inner.dirty_since.write().await;
                 *dirty_since = None;
             }
+            {
+                let mut last_after_refresh_failure = self
+                    .inner
+                    .last_after_refresh_failure_dirty_since
+                    .write()
+                    .await;
+                *last_after_refresh_failure = None;
+            }
             if matches!(trigger, BackupTrigger::Daily | BackupTrigger::AfterRefresh) {
                 let mut last_auto = self.inner.last_auto_backup_at.write().await;
                 *last_auto = Some(created_at);
@@ -518,6 +568,8 @@ impl BackupCoordinator {
             if matches!(trigger, BackupTrigger::Daily) {
                 let mut last_daily = self.inner.last_daily_backup_for.write().await;
                 *last_daily = Some(created_at.date_naive());
+                let mut last_daily_failure = self.inner.last_daily_failure_for.write().await;
+                *last_daily_failure = None;
             }
             let (created_at_display, trigger_display) =
                 crate::s3_compatible::parse_snapshot_name_for_display(&snapshot_key);
@@ -583,6 +635,22 @@ impl BackupCoordinator {
                 );
             }
             Err(err) => {
+                match trigger {
+                    BackupTrigger::AfterRefresh => {
+                        let mut last_after_refresh_failure = self
+                            .inner
+                            .last_after_refresh_failure_dirty_since
+                            .write()
+                            .await;
+                        *last_after_refresh_failure = dirty_since;
+                    }
+                    BackupTrigger::Daily => {
+                        let mut last_daily_failure =
+                            self.inner.last_daily_failure_for.write().await;
+                        *last_daily_failure = Some(Utc::now().date_naive());
+                    }
+                    BackupTrigger::Manual => {}
+                }
                 let _ = self.inner.logger.runtime(
                     "error",
                     format!(
@@ -713,7 +781,18 @@ impl BackupCoordinator {
     ) -> Result<bool> {
         let dirty_since = *self.inner.dirty_since.read().await;
         let last_auto = *self.inner.last_auto_backup_at.read().await;
-        let Some(due_at) = compute_after_refresh_due_at(backup, dirty_since, last_auto)? else {
+        let last_failed_dirty_since = *self
+            .inner
+            .last_after_refresh_failure_dirty_since
+            .read()
+            .await;
+        let Some(due_at) = compute_after_refresh_due_at(
+            backup,
+            dirty_since,
+            last_auto,
+            last_failed_dirty_since,
+        )?
+        else {
             return Ok(false);
         };
         Ok(now >= due_at)
@@ -726,7 +805,12 @@ impl BackupCoordinator {
     ) -> Result<Duration> {
         let mut candidates = Vec::new();
         if let Some(next_daily_at) =
-            compute_next_daily_at(backup, *self.inner.last_daily_backup_for.read().await, now)
+            compute_next_daily_at(
+                backup,
+                *self.inner.last_daily_backup_for.read().await,
+                *self.inner.last_daily_failure_for.read().await,
+                now,
+            )
         {
             let wait = (next_daily_at - now)
                 .to_std()
@@ -735,7 +819,17 @@ impl BackupCoordinator {
         }
         let dirty_since = *self.inner.dirty_since.read().await;
         let last_auto = *self.inner.last_auto_backup_at.read().await;
-        if let Some(due_at) = compute_after_refresh_due_at(backup, dirty_since, last_auto)? {
+        let last_failed_dirty_since = *self
+            .inner
+            .last_after_refresh_failure_dirty_since
+            .read()
+            .await;
+        if let Some(due_at) = compute_after_refresh_due_at(
+            backup,
+            dirty_since,
+            last_auto,
+            last_failed_dirty_since,
+        )? {
             let wait = (due_at - now)
                 .to_std()
                 .unwrap_or_else(|_| Duration::from_secs(1));
@@ -816,9 +910,13 @@ fn is_backup_remote_configured(backup: &BackupConfig) -> bool {
 fn should_run_daily(
     backup: &BackupConfig,
     last_daily_backup_for: Option<NaiveDate>,
+    last_daily_failure_for: Option<NaiveDate>,
     now: DateTime<Utc>,
 ) -> bool {
     if !backup.schedule.daily_utc_enabled {
+        return false;
+    }
+    if last_daily_failure_for == Some(now.date_naive()) {
         return false;
     }
     last_daily_backup_for != Some(now.date_naive())
@@ -827,9 +925,13 @@ fn should_run_daily(
 fn compute_next_daily_at(
     backup: &BackupConfig,
     last_daily_backup_for: Option<NaiveDate>,
+    last_daily_failure_for: Option<NaiveDate>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     if !backup.schedule.daily_utc_enabled {
+        return None;
+    }
+    if last_daily_failure_for == Some(now.date_naive()) {
         return None;
     }
     let target_date = if last_daily_backup_for == Some(now.date_naive()) {
@@ -846,6 +948,7 @@ fn compute_after_refresh_due_at(
     backup: &BackupConfig,
     dirty_since: Option<DateTime<Utc>>,
     last_auto_backup_at: Option<DateTime<Utc>>,
+    last_after_refresh_failure_dirty_since: Option<DateTime<Utc>>,
 ) -> Result<Option<DateTime<Utc>>> {
     if !backup.schedule.after_refresh_enabled {
         return Ok(None);
@@ -853,6 +956,9 @@ fn compute_after_refresh_due_at(
     let Some(dirty_since) = dirty_since else {
         return Ok(None);
     };
+    if last_after_refresh_failure_dirty_since == Some(dirty_since) {
+        return Ok(None);
+    }
     let debounce =
         chrono::Duration::from_std(parse_duration_str(&backup.schedule.after_refresh_debounce)?)
             .context("invalid backup after_refresh_debounce")?;
@@ -1032,7 +1138,7 @@ mod tests {
         backup.schedule.min_interval_between_auto_backups = "6h".to_string();
         let dirty_since = Utc.with_ymd_and_hms(2026, 4, 6, 15, 38, 1).unwrap();
 
-        let due_at = compute_after_refresh_due_at(&backup, Some(dirty_since), None)
+        let due_at = compute_after_refresh_due_at(&backup, Some(dirty_since), None, None)
             .unwrap()
             .unwrap();
 
@@ -1048,7 +1154,12 @@ mod tests {
         let last_auto_backup_at = Utc.with_ymd_and_hms(2026, 4, 6, 11, 54, 41).unwrap();
 
         let due_at =
-            compute_after_refresh_due_at(&backup, Some(dirty_since), Some(last_auto_backup_at))
+            compute_after_refresh_due_at(
+                &backup,
+                Some(dirty_since),
+                Some(last_auto_backup_at),
+                None,
+            )
                 .unwrap()
                 .unwrap();
 
@@ -1062,7 +1173,19 @@ mod tests {
     fn after_refresh_due_at_is_none_when_no_pending_dirty_data() {
         let backup = BackupConfig::default();
 
-        let due_at = compute_after_refresh_due_at(&backup, None, None).unwrap();
+        let due_at = compute_after_refresh_due_at(&backup, None, None, None).unwrap();
+
+        assert_eq!(due_at, None);
+    }
+
+    #[test]
+    fn after_refresh_due_at_is_none_after_failure_until_new_dirty_mark() {
+        let backup = BackupConfig::default();
+        let dirty_since = Utc.with_ymd_and_hms(2026, 4, 6, 15, 38, 1).unwrap();
+
+        let due_at =
+            compute_after_refresh_due_at(&backup, Some(dirty_since), None, Some(dirty_since))
+                .unwrap();
 
         assert_eq!(due_at, None);
     }

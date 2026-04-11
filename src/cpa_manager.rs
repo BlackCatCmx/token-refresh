@@ -121,7 +121,7 @@ impl CpaManager {
             cleared += 1;
         }
         if cleared > 0 {
-            self.backup.mark_dirty();
+            self.backup.mark_dirty("cpa_clear_due_exhausted");
         }
         Ok(cleared)
     }
@@ -332,7 +332,7 @@ impl CpaManager {
         }
 
         if local_changed {
-            self.backup.mark_dirty();
+            self.backup.mark_dirty("cpa_inspect_once");
             self.scheduler.wake();
         }
 

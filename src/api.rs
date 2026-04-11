@@ -307,7 +307,7 @@ async fn import_json_credentials(
                 "info",
                 format!("imported {} JSON credential file(s)", imported.len()),
             );
-            state.backup.mark_dirty();
+            state.backup.mark_dirty("import_json_credentials");
             state.scheduler.wake();
             Json(serde_json::json!({ "imported": imported })).into_response()
         }
@@ -370,7 +370,7 @@ async fn import_zip_credentials(
                 "info",
                 format!("imported {} credential file(s) from ZIP", imported.len()),
             );
-            state.backup.mark_dirty();
+            state.backup.mark_dirty("import_zip_credentials");
             state.scheduler.wake();
             Json(serde_json::json!({ "imported": imported })).into_response()
         }
@@ -428,7 +428,7 @@ async fn patch_credential_user_agents(state: Arc<AppState>, mode: UserAgentPatch
                 ),
             );
             if updated > 0 {
-                state.backup.mark_dirty();
+                state.backup.mark_dirty("patch_credential_user_agents");
             }
             state.scheduler.wake();
             Json(UserAgentPatchResponse {
@@ -466,7 +466,7 @@ async fn refresh_credential(
         .await
     {
         Ok(outcome) if outcome.success => {
-            state.backup.mark_dirty();
+            state.backup.mark_dirty("manual_refresh");
             state.scheduler.wake();
             Json(SimpleMessage {
                 message: outcome.message,
@@ -517,7 +517,7 @@ async fn restore_credentials(
                     count
                 ),
             );
-            state.backup.mark_dirty();
+            state.backup.mark_dirty("restore_credentials");
             state.scheduler.wake();
             Json(serde_json::json!({ "restored": count })).into_response()
         }
@@ -554,7 +554,7 @@ async fn delete_credentials(
         ),
     );
     if !payload.names.is_empty() {
-        state.backup.mark_dirty();
+        state.backup.mark_dirty("delete_credentials");
     }
     state.scheduler.wake();
     Json(serde_json::json!({ "deleted": payload.names.len() })).into_response()
@@ -653,7 +653,7 @@ async fn update_credential_content(
                     zone.as_str()
                 ),
             );
-            state.backup.mark_dirty();
+            state.backup.mark_dirty("update_credential_content");
             state.scheduler.wake();
             Json(SimpleMessage {
                 message: "凭证已保存".to_string(),
