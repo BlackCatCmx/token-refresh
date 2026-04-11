@@ -21,6 +21,7 @@
   <nav class="tabs">
     <button type="button" class="tab-btn active" data-tab="status" onclick="switchTab('status')">状态</button>
     <button type="button" class="tab-btn" data-tab="credentials" onclick="switchTab('credentials')">凭证</button>
+    <button type="button" class="tab-btn" data-tab="cpa" onclick="switchTab('cpa')">CPA管理</button>
     <button type="button" class="tab-btn" data-tab="settings" onclick="switchTab('settings')">设置</button>
   </nav>
   <main>
@@ -114,6 +115,64 @@
         </div>
         <div id="abnormal-cards" class="cred-grid"></div>
         <div id="abnormal-pager" class="cred-pager"></div>
+      </section>
+    </div>
+
+    <div id="tab-cpa" class="tab-panel hidden">
+      <section class="full-width">
+        <div class="section-header">
+          <h2>巡查操作</h2>
+          <div class="toolbar">
+            <button type="button" id="cpa-inspect-btn" onclick="runCpaInspectOnce()">立即巡查</button>
+          </div>
+        </div>
+        <div id="cpa-status" class="status-grid">
+          <span class="status-label">加载中...</span>
+        </div>
+      </section>
+      <section class="full-width">
+        <h2>CPA 连接配置</h2>
+        <div class="grid">
+          <label class="checkbox-row"><input type="checkbox" id="cpa-enabled"> 开启自动巡查</label>
+          <div></div>
+          <div><label>CLIProxyAPI Base URL</label><input type="text" id="cpa-base-url" placeholder="http://host:8317"></div>
+          <div>
+            <label>管理 Key</label>
+            <input type="password" id="cpa-management-key" autocomplete="new-password" placeholder="留空表示保持不变">
+            <div id="cpa-management-key-meta" class="muted"></div>
+          </div>
+          <div><label>巡查间隔（分钟）</label><input type="number" id="cpa-inspect-interval" min="1"></div>
+        </div>
+        <div class="sub-card-grid">
+          <div class="sub-card">
+            <h3 class="settings-group-title">安全保护</h3>
+            <div class="grid">
+              <label class="checkbox-row"><input type="checkbox" id="cpa-safety-abort-enabled"> 启用异常占比保护</label>
+              <div><label>占比阈值（%）</label><input type="number" id="cpa-safety-abort-ratio" min="1" max="100"></div>
+            </div>
+          </div>
+          <div class="sub-card">
+            <h3 class="settings-group-title">自动补号</h3>
+            <div class="grid">
+              <label class="checkbox-row"><input type="checkbox" id="cpa-auto-supplement-enabled"> 开启自动补号</label>
+              <div><label>目标数量</label><input type="number" id="cpa-supplement-target" min="1"></div>
+            </div>
+          </div>
+        </div>
+        <div class="toolbar toolbar-top">
+          <button type="button" onclick="saveCpaConfig()">保存配置</button>
+        </div>
+      </section>
+      <section class="full-width">
+        <div class="section-header">
+          <h2>CPA 日志（最近 50 条）</h2>
+          <div class="toolbar">
+            <button type="button" onclick="reloadCpaLog()">刷新</button>
+            <button type="button" class="secondary" onclick="downloadCpaLog()">下载</button>
+            <button type="button" class="warn" onclick="clearCpaLog()">清空</button>
+          </div>
+        </div>
+        <pre id="cpa-log"></pre>
       </section>
     </div>
 

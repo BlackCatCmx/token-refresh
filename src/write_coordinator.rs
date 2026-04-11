@@ -6,6 +6,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 #[derive(Clone, Debug)]
 pub struct WriteCoordinator {
+    activity_lock: Arc<Mutex<()>>,
     commit_lock: Arc<Mutex<()>>,
     restore_active: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
@@ -20,6 +21,7 @@ impl Default for WriteCoordinator {
 impl WriteCoordinator {
     pub fn new() -> Self {
         Self {
+            activity_lock: Arc::new(Mutex::new(())),
             commit_lock: Arc::new(Mutex::new(())),
             restore_active: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
@@ -46,6 +48,10 @@ impl WriteCoordinator {
             coordinator: self.clone(),
             active: true,
         })
+    }
+
+    pub async fn lock_activity(&self) -> OwnedMutexGuard<()> {
+        self.activity_lock.clone().lock_owned().await
     }
 
     pub async fn lock_commit(&self) -> OwnedMutexGuard<()> {

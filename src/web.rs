@@ -10,6 +10,10 @@ use tokio::net::TcpListener;
 use crate::api;
 use crate::backup::BackupCoordinator;
 use crate::config::{ConfigManager, ConfigPaths, parse_byte_size_str};
+use crate::cpa_config::CpaConfigStore;
+use crate::cpa_log::CpaLog;
+use crate::cpa_manager::CpaManager;
+use crate::cpa_scheduler::CpaSchedulerHandle;
 use crate::credential_store::CredentialStore;
 use crate::lockfile::ServiceLock;
 use crate::logging::LogManager;
@@ -31,6 +35,10 @@ pub struct AppState {
     pub scheduler: SchedulerHandle,
     pub transaction: Arc<RefreshTransaction>,
     pub backup: Arc<BackupCoordinator>,
+    pub cpa_config: Arc<CpaConfigStore>,
+    pub cpa_manager: Arc<CpaManager>,
+    pub cpa_scheduler: CpaSchedulerHandle,
+    pub cpa_log: Arc<CpaLog>,
     pub write_coordinator: Arc<WriteCoordinator>,
     pub session_manager: SessionManager,
     pub _service_lock: Arc<ServiceLock>,
@@ -145,6 +153,17 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         logger.clone(),
         write_coordinator.clone(),
     ));
+    let cpa_log = Arc::new(CpaLog::new(&config.state_dir)?);
+    let cpa_config = Arc::new(CpaConfigStore::load(&config.state_dir)?);
+    let cpa_manager = Arc::new(CpaManager::new(
+        store.clone(),
+        status_store.clone(),
+        write_coordinator.clone(),
+        backup.clone(),
+        scheduler.clone(),
+        cpa_log.clone(),
+    ));
+    let cpa_scheduler = CpaSchedulerHandle::start(cpa_manager.clone(), cpa_config.clone());
     let session_manager = SessionManager::new(&config_manager.web_password().await)?;
     backup.spawn_background();
 
@@ -158,6 +177,7 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
             Some(backup),
             logger,
         );
+        cpa_scheduler.wake();
         tokio::signal::ctrl_c().await?;
         return Ok(());
     }
@@ -178,6 +198,10 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         scheduler: scheduler.clone(),
         transaction: transaction.clone(),
         backup: backup.clone(),
+        cpa_config: cpa_config.clone(),
+        cpa_manager: cpa_manager.clone(),
+        cpa_scheduler: cpa_scheduler.clone(),
+        cpa_log: cpa_log.clone(),
         write_coordinator,
         session_manager,
         _service_lock: service_lock,
@@ -190,6 +214,7 @@ pub async fn serve(config_paths: ConfigPaths) -> Result<()> {
         Some(backup),
         logger,
     );
+    cpa_scheduler.wake();
 
     let app = api::router(state);
     axum::serve(listener, app)

@@ -630,6 +630,7 @@ impl BackupCoordinator {
             let backup = ensure_backup_ready(&config.backup)?;
             let (client, status) = self.cached_s3_client(&backup.remote).await?;
             cache_status = Some(status);
+            let _activity_guard = self.inner.write_coordinator.lock_activity().await;
             let freeze_guard = self.inner.write_coordinator.begin_restore()?;
             self.inner.scheduler.pause().await;
             let result = async {

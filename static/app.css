@@ -161,6 +161,19 @@ section {
 
 .select-all-label input[type="checkbox"] { width: 16px; height: 16px; }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #475569;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
 
 /* ── Buttons ── */
 button {
@@ -561,6 +574,7 @@ select:disabled, input:disabled, textarea:disabled {
 }
 
 .toast--success { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.toast--warning { background: #fef3c7; color: #b45309; border: 1px solid #fcd34d; }
 .toast--error   { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; }
 
 @keyframes toast-in {
@@ -607,6 +621,7 @@ pre {
   color: #b45309;
 }
 
+.warn-text { color: #b45309; }
 .danger-text { color: #dc2626; }
 
 /* ── Scheduler Status ── */
@@ -627,6 +642,29 @@ pre {
 .backup-sep  { margin: 0 7px; color: #cbd5e1; }
 
 .cred-count  { margin-left: 6px; font-size: 13px; font-weight: 400; color: #94a3b8; }
+
+.badge-exhausted {
+  background: #f5a623;
+  color: #fff;
+}
+
+.sub-card-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin-top: 12px;
+}
+
+.sub-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.sub-card .settings-group-title {
+  margin-top: 0;
+}
 
 .cred-pager {
   display: flex;

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::archive;
 use crate::backup::RestoreResult;
 use crate::config::{EditableSettings, parse_byte_size_str};
+use crate::cpa_config::CpaConfig;
 use crate::credential::CodexCredentialFile;
 use crate::credential_store::{CredentialStore, CredentialZone};
 use crate::import::{
@@ -73,6 +74,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/logs", get(get_logs))
         .route("/api/logs/download", get(download_logs))
         .route("/api/logs/clear", post(clear_logs))
+        .route(
+            "/api/cpa/config",
+            get(get_cpa_config).put(update_cpa_config),
+        )
+        .route("/api/cpa/status", get(get_cpa_status))
+        .route("/api/cpa/inspect-once", post(run_cpa_inspect_once))
+        .route("/api/cpa/logs", get(get_cpa_logs))
+        .route("/api/cpa/logs/download", get(download_cpa_logs))
+        .route("/api/cpa/logs/clear", post(clear_cpa_logs))
         .route(
             "/api/settings/header-preview",
             get(get_random_header_preview),
@@ -224,6 +234,8 @@ struct CredentialView {
     consecutive_failure_count: u32,
     last_failure_code: Option<String>,
     last_failure_reason: Option<String>,
+    cpa_exhausted: bool,
+    exhausted_resets_at: Option<String>,
 }
 
 async fn list_credentials(
@@ -256,6 +268,10 @@ fn build_credential_views(state: &AppState, zone: CredentialZone) -> Result<Vec<
                 .unwrap_or(0),
             last_failure_code: status.and_then(|value| value.last_failure_code.clone()),
             last_failure_reason: status.and_then(|value| value.last_failure_reason.clone()),
+            cpa_exhausted: status
+                .and_then(|value| value.cpa_exhausted)
+                .unwrap_or(false),
+            exhausted_resets_at: status.and_then(|value| value.exhausted_resets_at.clone()),
         });
     }
     Ok(items)
@@ -903,6 +919,133 @@ async fn clear_logs(
     match state.logger.clear(kind) {
         Ok(()) => Json(SimpleMessage {
             message: "日志已清空".to_string(),
+        })
+        .into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CpaConfigResponse {
+    enabled: bool,
+    base_url: String,
+    inspect_interval_minutes: u64,
+    auto_supplement_enabled: bool,
+    supplement_target: usize,
+    safety_abort_enabled: bool,
+    safety_abort_ratio_percent: u8,
+    management_key_set: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateCpaConfigRequest {
+    enabled: bool,
+    base_url: String,
+    management_key: String,
+    inspect_interval_minutes: u64,
+    auto_supplement_enabled: bool,
+    supplement_target: usize,
+    safety_abort_enabled: bool,
+    safety_abort_ratio_percent: u8,
+}
+
+async fn get_cpa_config(State(state): State<Arc<AppState>>) -> Response {
+    let config = state.cpa_config.get();
+    Json(CpaConfigResponse {
+        enabled: config.enabled,
+        base_url: config.base_url,
+        inspect_interval_minutes: config.inspect_interval_minutes,
+        auto_supplement_enabled: config.auto_supplement_enabled,
+        supplement_target: config.supplement_target,
+        safety_abort_enabled: config.safety_abort_enabled,
+        safety_abort_ratio_percent: config.safety_abort_ratio_percent,
+        management_key_set: !config.management_key.trim().is_empty(),
+    })
+    .into_response()
+}
+
+async fn update_cpa_config(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpdateCpaConfigRequest>,
+) -> Response {
+    let existing = state.cpa_config.get();
+    let config = CpaConfig {
+        enabled: payload.enabled,
+        base_url: payload.base_url,
+        management_key: if payload.management_key.trim().is_empty() {
+            existing.management_key
+        } else {
+            payload.management_key
+        },
+        inspect_interval_minutes: payload.inspect_interval_minutes,
+        auto_supplement_enabled: payload.auto_supplement_enabled,
+        supplement_target: payload.supplement_target,
+        safety_abort_enabled: payload.safety_abort_enabled,
+        safety_abort_ratio_percent: payload.safety_abort_ratio_percent,
+    };
+    match state.cpa_config.set(config) {
+        Ok(()) => {
+            state.cpa_scheduler.wake();
+            Json(SimpleMessage {
+                message: "CPA 配置已保存".to_string(),
+            })
+            .into_response()
+        }
+        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CpaStatusResponse {
+    #[serde(flatten)]
+    status: crate::cpa_scheduler::CpaSchedulerStatus,
+    last_result: Option<crate::cpa_manager::InspectResult>,
+}
+
+async fn get_cpa_status(State(state): State<Arc<AppState>>) -> Response {
+    Json(CpaStatusResponse {
+        status: state.cpa_scheduler.status().await,
+        last_result: state.cpa_manager.last_result(),
+    })
+    .into_response()
+}
+
+async fn run_cpa_inspect_once(State(state): State<Arc<AppState>>) -> Response {
+    let config = state.cpa_config.get();
+    let result = state.cpa_manager.inspect_once(&config).await;
+    Json(result).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct CpaLogsQuery {
+    limit: Option<usize>,
+}
+
+async fn get_cpa_logs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CpaLogsQuery>,
+) -> Response {
+    match state.cpa_log.read_tail(clamp_log_line_limit(query.limit)) {
+        Ok(content) => Json(LogsResponse {
+            kind: "cpa".to_string(),
+            content,
+        })
+        .into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
+async fn download_cpa_logs(State(state): State<Arc<AppState>>) -> Response {
+    match state.cpa_log.read_bytes() {
+        Ok(bytes) => download_response("text/plain; charset=utf-8", "cpa.log", bytes),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
+async fn clear_cpa_logs(State(state): State<Arc<AppState>>) -> Response {
+    match state.cpa_log.clear() {
+        Ok(()) => Json(SimpleMessage {
+            message: "CPA 日志已清空".to_string(),
         })
         .into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),

@@ -24,6 +24,19 @@ pub struct CredentialStatusRecord {
     pub moved_to_abnormal_at: Option<String>,
     #[serde(default)]
     pub last_success_at: Option<String>,
+    #[serde(default)]
+    pub cpa_exhausted: Option<bool>,
+    #[serde(default)]
+    pub cpa_imported_at: Option<String>,
+    #[serde(default)]
+    pub exhausted_resets_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExhaustedPendingReset {
+    pub key: String,
+    pub cpa_imported_at: Option<String>,
+    pub exhausted_resets_at: Option<String>,
 }
 
 #[derive(Debug)]
@@ -98,6 +111,7 @@ impl CredentialStatusStore {
         record.last_failure_at = Some(now.clone());
         if moved_to_abnormal {
             record.moved_to_abnormal_at = Some(now);
+            clear_cpa_flags(record);
         }
         let snapshot = record.clone();
         let _ = record;
@@ -119,6 +133,7 @@ impl CredentialStatusStore {
         record.last_failure_at = None;
         record.moved_to_abnormal_at = None;
         record.last_success_at = Some(now);
+        clear_cpa_flags(record);
         let snapshot = record.clone();
         let _ = record;
         persist_locked(&self.path, &guard)?;
@@ -137,10 +152,66 @@ impl CredentialStatusStore {
         record.last_failure_reason = None;
         record.last_failure_at = None;
         record.moved_to_abnormal_at = None;
+        clear_cpa_flags(record);
         let snapshot = record.clone();
         let _ = record;
         persist_locked(&self.path, &guard)?;
         Ok(snapshot)
+    }
+
+    pub fn set_cpa_exhausted(
+        &self,
+        key: &str,
+        resets_at: Option<String>,
+    ) -> Result<CredentialStatusRecord> {
+        let now = Utc::now().to_rfc3339();
+        let mut guard = self
+            .records
+            .lock()
+            .map_err(|_| anyhow::anyhow!("status store lock poisoned"))?;
+        let record = guard.entry(normalize_status_key(key)).or_default();
+        record.zone = "normal".to_string();
+        record.consecutive_failure_count = 0;
+        record.last_failure_code = None;
+        record.last_failure_reason = None;
+        record.last_failure_at = None;
+        record.moved_to_abnormal_at = None;
+        record.cpa_exhausted = Some(true);
+        record.cpa_imported_at = Some(now);
+        record.exhausted_resets_at = normalize_optional_text(resets_at);
+        let snapshot = record.clone();
+        let _ = record;
+        persist_locked(&self.path, &guard)?;
+        Ok(snapshot)
+    }
+
+    pub fn clear_cpa_exhausted(&self, key: &str) -> Result<CredentialStatusRecord> {
+        let mut guard = self
+            .records
+            .lock()
+            .map_err(|_| anyhow::anyhow!("status store lock poisoned"))?;
+        let record = guard.entry(normalize_status_key(key)).or_default();
+        clear_cpa_flags(record);
+        let snapshot = record.clone();
+        let _ = record;
+        persist_locked(&self.path, &guard)?;
+        Ok(snapshot)
+    }
+
+    pub fn list_exhausted_pending_reset(&self) -> Result<Vec<ExhaustedPendingReset>> {
+        let guard = self
+            .records
+            .lock()
+            .map_err(|_| anyhow::anyhow!("status store lock poisoned"))?;
+        Ok(guard
+            .iter()
+            .filter(|(_, record)| record.cpa_exhausted.unwrap_or(false))
+            .map(|(key, record)| ExhaustedPendingReset {
+                key: key.clone(),
+                cpa_imported_at: record.cpa_imported_at.clone(),
+                exhausted_resets_at: record.exhausted_resets_at.clone(),
+            })
+            .collect())
     }
 
     pub fn remove(&self, key: &str) -> Result<()> {
@@ -182,4 +253,21 @@ fn persist_locked(path: &Path, records: &BTreeMap<String, CredentialStatusRecord
 
 fn default_zone() -> String {
     "normal".to_string()
+}
+
+fn clear_cpa_flags(record: &mut CredentialStatusRecord) {
+    record.cpa_exhausted = None;
+    record.cpa_imported_at = None;
+    record.exhausted_resets_at = None;
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }

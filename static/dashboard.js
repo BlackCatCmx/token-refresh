@@ -40,10 +40,13 @@ async function refreshAll() {
   await Promise.all([
     loadScheduler(),
     loadBackupStatus(),
+    loadCpaConfig(),
+    loadCpaStatus(),
     loadCredentials("normal"),
     loadCredentials("abnormal"),
     reloadLog("runtime"),
     reloadLog("audit"),
+    reloadCpaLog(),
   ]);
 }
 
@@ -459,8 +462,12 @@ function buildCredCard(zone, row) {
   const statusBadge = row.zone === "abnormal"
     ? '<span class="pill pill-warn">异常区</span>'
     : '<span class="pill">正常</span>';
+  const exhaustedBadge = zone === "normal" && row.cpa_exhausted
+    ? `<span class="pill badge-exhausted">${escapeHtml(formatExhaustedBadge(row.exhausted_resets_at))}</span>`
+    : "";
+  const failureCount = Number(row.consecutive_failure_count || 0);
   const failure = row.last_failure_code
-    ? `<div class="cred-error">${escapeHtml(row.last_failure_code)} (${row.consecutive_failure_count})${row.last_failure_reason ? " — " + escapeHtml(row.last_failure_reason) : ""}</div>`
+    ? `<div class="cred-error">${escapeHtml(row.last_failure_code)}${failureCount > 0 ? ` (${failureCount})` : ""}${row.last_failure_reason ? " — " + escapeHtml(row.last_failure_reason) : ""}</div>`
     : "";
   const parseErr = row.parse_error
     ? `<div class="cred-error">${escapeHtml(row.parse_error)}</div>`
@@ -482,11 +489,23 @@ function buildCredCard(zone, row) {
       <input type="checkbox" class="row-check card-check" data-zone="${zone}" data-name="${encodedName}" onchange="toggleRowSelection('${zone}', '${encodedName}', this.checked)" ${credState[zone].selected.has(row.name) ? "checked" : ""}>
       <span class="cred-name">${escapeHtml(displayName)}</span>
       ${statusBadge}
+      ${exhaustedBadge}
     </div>
     ${failure}${parseErr}
     <div class="cred-card-actions">${actions}</div>
   `;
   return card;
+}
+
+function formatExhaustedBadge(resetsAt) {
+  if (!resetsAt) return "耗尽（~7d 后自动恢复）";
+  const d = new Date(resetsAt);
+  if (isNaN(d.getTime())) return `耗尽（重置于 ${resetsAt}）`;
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `耗尽（重置于 ${mm}/${dd} ${hh}:${min}）`;
 }
 
 function renderPager(zone, total, page, pageSize) {
@@ -848,13 +867,143 @@ async function reassignAllUserAgents() {
   alert(formatUserAgentPatchMessage("重配 UA-全量", data));
 }
 
+async function loadCpaConfig() {
+  const data = await api("api/cpa/config");
+  document.getElementById("cpa-enabled").checked = Boolean(data.enabled);
+  document.getElementById("cpa-base-url").value = data.base_url || "";
+  document.getElementById("cpa-management-key").value = "";
+  document.getElementById("cpa-management-key-meta").textContent = data.management_key_set
+    ? "当前：已设置"
+    : "当前：未设置";
+  document.getElementById("cpa-inspect-interval").value = data.inspect_interval_minutes ?? 60;
+  document.getElementById("cpa-auto-supplement-enabled").checked = Boolean(data.auto_supplement_enabled);
+  document.getElementById("cpa-supplement-target").value = data.supplement_target ?? 50;
+  document.getElementById("cpa-safety-abort-enabled").checked = Boolean(data.safety_abort_enabled);
+  document.getElementById("cpa-safety-abort-ratio").value = data.safety_abort_ratio_percent ?? 50;
+}
+
+async function saveCpaConfig() {
+  try {
+    await api("api/cpa/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: document.getElementById("cpa-enabled").checked,
+        base_url: document.getElementById("cpa-base-url").value,
+        management_key: document.getElementById("cpa-management-key").value,
+        inspect_interval_minutes: Number(document.getElementById("cpa-inspect-interval").value),
+        auto_supplement_enabled: document.getElementById("cpa-auto-supplement-enabled").checked,
+        supplement_target: Number(document.getElementById("cpa-supplement-target").value),
+        safety_abort_enabled: document.getElementById("cpa-safety-abort-enabled").checked,
+        safety_abort_ratio_percent: Number(document.getElementById("cpa-safety-abort-ratio").value),
+      }),
+    });
+    await Promise.all([loadCpaConfig(), loadCpaStatus()]);
+    showToast("CPA 配置已保存");
+  } catch (error) {
+    showToast(error.message, "error", 4500);
+  }
+}
+
+async function loadCpaStatus() {
+  const data = await api("api/cpa/status");
+  const last = data.last_result || null;
+  const container = document.getElementById("cpa-status");
+  const running = Boolean(data.running);
+  const lastHasWarnings = Boolean(last && last.ok && last.warnings?.length);
+  const lastStateText = !last
+    ? "未运行"
+    : lastHasWarnings
+      ? "成功（有告警）"
+    : last.ok
+      ? "成功"
+      : "失败";
+  const lastStateClass = !last
+    ? "status-off"
+    : lastHasWarnings
+      ? "warn-text"
+    : last.ok
+      ? "status-on"
+      : "danger-text";
+  const summary = !last
+    ? "无"
+    : `total=${last.total_codex} | 异常候选=${last.candidates_401} | 移入异常区=${last.moved_to_abnormal} | 耗尽候选=${last.candidates_exhausted} | 移入正常区=${last.moved_to_normal_exhausted} | 补号=${last.supplement_done}`;
+  const lastRange = !last
+    ? "未运行"
+    : `${escapeHtml(shortTime(last.started_at))} -> ${escapeHtml(shortTime(last.finished_at))}`;
+  const detailMessage = data.last_error || (last ? (last.error || last.errors?.[0] || last.warnings?.[0]) : "");
+  const detailLabel = data.last_error || (last && !last.ok)
+    ? "最近错误"
+    : lastHasWarnings
+      ? "最近告警"
+      : "最近错误";
+  const detailClass = data.last_error || (last && !last.ok)
+    ? "danger-text"
+    : lastHasWarnings
+      ? "warn-text"
+      : "";
+  container.innerHTML = `
+    <span class="status-label">自动巡查</span>
+    <span class="${data.enabled ? "status-on" : "status-off"}">${data.enabled ? "已开启" : "已关闭"}</span>
+    <span class="status-label">当前状态</span>
+    <span class="${running ? "status-on" : "status-off"}">${running ? "执行中" : "空闲"}</span>
+    <span class="status-label">下次巡查</span>
+    <span>${escapeHtml(data.next_wake_at ? shortTime(data.next_wake_at) : "待定")}</span>
+    <span class="status-label">上次结果</span>
+    <span class="${lastStateClass}">${escapeHtml(lastStateText)}</span>
+    <span class="status-label">上次时间</span>
+    <span>${lastRange}</span>
+    <span class="status-label">统计</span>
+    <span>${escapeHtml(summary)}</span>
+    <span class="status-label">${detailLabel}</span>
+    <span${detailClass ? ` class="${detailClass}"` : ""}>${escapeHtml(detailMessage || "无")}</span>
+  `;
+  const inspectBtn = document.getElementById("cpa-inspect-btn");
+  inspectBtn.disabled = running;
+  inspectBtn.textContent = running ? "巡查执行中" : "立即巡查";
+}
+
+async function runCpaInspectOnce() {
+  const btn = document.getElementById("cpa-inspect-btn");
+  btn.disabled = true;
+  btn.classList.add("loading");
+  try {
+    const data = await api("api/cpa/inspect-once", { method: "POST" });
+    await refreshAll();
+    if (data.ok && data.warnings?.length) {
+      showToast(`CPA巡查完成：移入异常 ${data.moved_to_abnormal}，移入耗尽 ${data.moved_to_normal_exhausted}，补号 ${data.supplement_done}；告警：${data.warnings[0]}`, "warning", 5500);
+    } else if (data.ok) {
+      showToast(`CPA巡查完成：移入异常 ${data.moved_to_abnormal}，移入耗尽 ${data.moved_to_normal_exhausted}，补号 ${data.supplement_done}`);
+    } else {
+      showToast(data.error || data.errors?.[0] || "CPA 巡查失败", "error", 4500);
+    }
+  } catch (error) {
+    showToast(error.message, "error", 4500);
+  } finally {
+    if (btn.isConnected) {
+      btn.disabled = false;
+      btn.classList.remove("loading");
+      btn.textContent = "立即巡查";
+    }
+  }
+}
+
 async function reloadLog(kind) {
   const data = await api(`api/logs?kind=${kind}&limit=${LOG_LINE_LIMIT}`);
   renderLog(kind, data.content || "");
 }
 
+async function reloadCpaLog() {
+  const data = await api(`api/cpa/logs?limit=${LOG_LINE_LIMIT}`);
+  renderLog("cpa", data.content || "");
+}
+
 function downloadLog(kind) {
   window.location.href = `api/logs/download?kind=${kind}`;
+}
+
+function downloadCpaLog() {
+  window.location.href = "api/cpa/logs/download";
 }
 
 async function clearLog(kind) {
@@ -864,6 +1013,11 @@ async function clearLog(kind) {
     body: JSON.stringify({ kind }),
   });
   await reloadLog(kind);
+}
+
+async function clearCpaLog() {
+  await api("api/cpa/logs/clear", { method: "POST" });
+  await reloadCpaLog();
 }
 
 async function logout() {
@@ -962,6 +1116,11 @@ window.importFiles = importFiles;
 window.fillMissingUserAgents = fillMissingUserAgents;
 window.reassignCliVersions = reassignCliVersions;
 window.reassignAllUserAgents = reassignAllUserAgents;
+window.saveCpaConfig = saveCpaConfig;
+window.runCpaInspectOnce = runCpaInspectOnce;
+window.reloadCpaLog = reloadCpaLog;
+window.downloadCpaLog = downloadCpaLog;
+window.clearCpaLog = clearCpaLog;
 window.runBackupNow = runBackupNow;
 window.openBackupRestoreModal = openBackupRestoreModal;
 window.closeBackupRestoreModal = closeBackupRestoreModal;

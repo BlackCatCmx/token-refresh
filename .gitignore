@@ -24,6 +24,7 @@ Thumbs.db
 /credentials/
 /credentials_abnormal/
 /state/
+/cpa_test/
 **/*.refresh-recovery.json
 
 # Reference projects not intended for this repo

@@ -73,7 +73,9 @@ impl RefreshTransaction {
         key: &str,
         trigger: RefreshTrigger,
     ) -> Result<RefreshOutcome> {
+        let _activity_guard = self.write_coordinator.lock_activity().await;
         let generation = self.write_coordinator.generation();
+        self.write_coordinator.ensure_writes_allowed()?;
         let entry = self.store.read_entry(zone, key)?;
         if let Some(parse_error) = entry.parse_error {
             return self
