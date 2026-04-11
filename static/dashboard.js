@@ -943,20 +943,36 @@ async function loadCpaStatus() {
       ? "warn-text"
       : "";
   container.innerHTML = `
-    <span class="status-label">自动巡查</span>
-    <span class="${data.enabled ? "status-on" : "status-off"}">${data.enabled ? "已开启" : "已关闭"}</span>
-    <span class="status-label">当前状态</span>
-    <span class="${running ? "status-on" : "status-off"}">${running ? "执行中" : "空闲"}</span>
-    <span class="status-label">下次巡查</span>
-    <span>${escapeHtml(data.next_wake_at ? shortTime(data.next_wake_at) : "待定")}</span>
-    <span class="status-label">上次结果</span>
-    <span class="${lastStateClass}">${escapeHtml(lastStateText)}</span>
-    <span class="status-label">上次时间</span>
-    <span>${lastRange}</span>
-    <span class="status-label">统计</span>
-    <span>${escapeHtml(summary)}</span>
-    <span class="status-label">${detailLabel}</span>
-    <span${detailClass ? ` class="${detailClass}"` : ""}>${escapeHtml(detailMessage || "无")}</span>
+    <div class="cpa-status-tiles">
+      <div class="cpa-tile">
+        <div class="cpa-tile-label">自动巡查</div>
+        <div class="cpa-tile-value ${data.enabled ? "status-on" : "status-off"}">${data.enabled ? "已开启" : "已关闭"}</div>
+      </div>
+      <div class="cpa-tile">
+        <div class="cpa-tile-label">当前状态</div>
+        <div class="cpa-tile-value ${running ? "status-on" : "status-off"}">${running ? "执行中" : "空闲"}</div>
+      </div>
+      <div class="cpa-tile">
+        <div class="cpa-tile-label">下次巡查</div>
+        <div class="cpa-tile-value">${escapeHtml(data.next_wake_at ? shortTime(data.next_wake_at) : "待定")}</div>
+      </div>
+      <div class="cpa-tile">
+        <div class="cpa-tile-label">上次结果</div>
+        <div class="cpa-tile-value ${lastStateClass}">${escapeHtml(lastStateText)}</div>
+      </div>
+      <div class="cpa-tile cpa-tile--wide">
+        <div class="cpa-tile-label">上次时间</div>
+        <div class="cpa-tile-value">${lastRange}</div>
+      </div>
+      <div class="cpa-tile cpa-tile--wide">
+        <div class="cpa-tile-label">${detailLabel}</div>
+        <div class="cpa-tile-value${detailClass ? ` ${detailClass}` : ""}">${escapeHtml(detailMessage || "无")}</div>
+      </div>
+      <div class="cpa-tile cpa-tile--full">
+        <div class="cpa-tile-label">统计</div>
+        <div class="cpa-tile-value cpa-tile-stats">${escapeHtml(summary)}</div>
+      </div>
+    </div>
   `;
   const inspectBtn = document.getElementById("cpa-inspect-btn");
   inspectBtn.disabled = running;

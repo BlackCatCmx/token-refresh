@@ -648,6 +648,82 @@ pre {
   color: #fff;
 }
 
+/* ── CPA Status Tiles ── */
+.cpa-status-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.cpa-tile {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  min-width: 0;
+}
+
+.cpa-tile--wide { grid-column: span 2; }
+.cpa-tile--full { grid-column: 1 / -1; }
+
+.cpa-tile-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  margin-bottom: 5px;
+}
+
+.cpa-tile-value {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1e293b;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.cpa-tile-value.status-on {
+  color: #16a34a;
+  font-weight: 600;
+}
+
+.cpa-tile-value.status-off {
+  color: #94a3b8;
+}
+
+.cpa-tile-value.warn-text {
+  color: #b45309;
+}
+
+.cpa-tile-value.danger-text {
+  color: #dc2626;
+}
+
+.cpa-tile-stats {
+  font-size: 12px;
+  font-weight: 400;
+  font-family: "Consolas", "SFMono-Regular", monospace;
+  color: #475569;
+  word-break: break-all;
+}
+
+/* ── CPA Config Header ── */
+.cpa-config-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.cpa-config-header h2 { margin: 0; }
+
+/* CPA connection fields: URL(2fr) Key(2fr) Interval(1fr) */
+.cpa-conn-grid {
+  grid-template-columns: 2fr 2fr 1fr;
+}
+
 .sub-card-grid {
   display: grid;
   gap: 12px;
@@ -781,6 +857,10 @@ details.settings-group-collapsible > .grid { margin-top: 4px; }
 /* ── Responsive ── */
 @media (max-width: 800px) {
   .tab-panel--status { grid-template-columns: 1fr; }
+  .cpa-status-tiles { grid-template-columns: repeat(2, 1fr); }
+  .cpa-tile--wide { grid-column: span 1; }
+  .cpa-tile--full { grid-column: 1 / -1; }
+  .cpa-conn-grid { grid-template-columns: 1fr; }
 
   header, nav.tabs, main { padding-left: 16px; padding-right: 16px; }
   header {

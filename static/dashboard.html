@@ -122,19 +122,18 @@
       <section class="full-width">
         <div class="section-header">
           <h2>巡查操作</h2>
-          <div class="toolbar">
-            <button type="button" id="cpa-inspect-btn" onclick="runCpaInspectOnce()">立即巡查</button>
-          </div>
+          <button type="button" id="cpa-inspect-btn" onclick="runCpaInspectOnce()">立即巡查</button>
         </div>
-        <div id="cpa-status" class="status-grid">
+        <div id="cpa-status">
           <span class="status-label">加载中...</span>
         </div>
       </section>
       <section class="full-width">
-        <h2>CPA 连接配置</h2>
-        <div class="grid">
+        <div class="cpa-config-header">
+          <h2>CPA 连接配置</h2>
           <label class="checkbox-row"><input type="checkbox" id="cpa-enabled"> 开启自动巡查</label>
-          <div></div>
+        </div>
+        <div class="grid cpa-conn-grid">
           <div><label>CLIProxyAPI Base URL</label><input type="text" id="cpa-base-url" placeholder="http://host:8317"></div>
           <div>
             <label>管理 Key</label>
