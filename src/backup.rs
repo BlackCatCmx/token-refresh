@@ -17,6 +17,7 @@ use crate::config::{BackupConfig, BackupRemoteConfig, ConfigManager, parse_durat
 use crate::credential_store::CredentialStore;
 use crate::fsutil;
 use crate::logging::LogManager;
+use crate::memdiag::{self, MemSample};
 use crate::s3_compatible::{RemoteSnapshot, S3CompatibleClient};
 use crate::scheduler::SchedulerHandle;
 use crate::status::CredentialStatusStore;
@@ -222,29 +223,6 @@ struct SnapshotTrimSummary {
     deleted_count: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct MemSample {
-    rss_kb: Option<u64>,
-    cg_kb: Option<u64>,
-    cg_anon_kb: Option<u64>,
-    cg_file_kb: Option<u64>,
-}
-
-impl MemSample {
-    fn fmt_rss(&self) -> String {
-        format_optional_u64(self.rss_kb)
-    }
-    fn fmt_cg(&self) -> String {
-        format_optional_u64(self.cg_kb)
-    }
-    fn fmt_anon(&self) -> String {
-        format_optional_u64(self.cg_anon_kb)
-    }
-    fn fmt_file(&self) -> String {
-        format_optional_u64(self.cg_file_kb)
-    }
-}
-
 impl BackupCoordinator {
     pub fn new(
         config_manager: ConfigManager,
@@ -342,7 +320,7 @@ impl BackupCoordinator {
 
     pub async fn list_snapshots(&self) -> Result<SnapshotListResult> {
         let started_at = Instant::now();
-        let rss_before_kb = process_rss_kb();
+        let rss_before_kb = memdiag::sample().rss_kb;
         let config = self.inner.config_manager.effective_config().await;
         self.sync_cached_s3_clients(&config.backup).await;
         let backup = ensure_backup_ready(&config.backup)?;
@@ -362,7 +340,7 @@ impl BackupCoordinator {
                             "backup snapshots client init failed remote={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
                             remote_name,
                             format_optional_u64(rss_before_kb),
-                            format_optional_u64(process_rss_kb()),
+                            format_optional_u64(memdiag::sample().rss_kb),
                             started_at.elapsed().as_millis(),
                         ),
                     );
@@ -388,7 +366,7 @@ impl BackupCoordinator {
                             remote_count,
                             cache_status.as_str(),
                             format_optional_u64(rss_before_kb),
-                            format_optional_u64(process_rss_kb()),
+                            format_optional_u64(memdiag::sample().rss_kb),
                             started_at.elapsed().as_millis(),
                         ),
                     );
@@ -402,7 +380,7 @@ impl BackupCoordinator {
                             remote_name,
                             cache_status.as_str(),
                             format_optional_u64(rss_before_kb),
-                            format_optional_u64(process_rss_kb()),
+                            format_optional_u64(memdiag::sample().rss_kb),
                             started_at.elapsed().as_millis(),
                         ),
                     );
@@ -410,7 +388,7 @@ impl BackupCoordinator {
             }
         }
         items.sort_by(compare_remote_snapshots_desc);
-        let rss_after_kb = process_rss_kb();
+        let rss_after_kb = memdiag::sample().rss_kb;
         if should_fail_snapshot_listing(success_count, warnings.len()) {
             bail!("所有备份端读取失败：{}", warnings.join(" | "));
         }
@@ -577,18 +555,27 @@ impl BackupCoordinator {
 
     async fn run_backup_once(&self, trigger: BackupTrigger) -> Result<RemoteSnapshot> {
         let started_at = Instant::now();
-        let mem_before = mem_sample_full();
+        let mem_before = memdiag::sample_full();
         let dirty_since = *self.inner.dirty_since.read().await;
         let last_auto_backup_at = *self.inner.last_auto_backup_at.read().await;
         let _ = self.inner.logger.runtime(
             "info",
             format!(
-                "backup started trigger={} rss_before_kb={} cg_before_kb={} cg_anon_kb={} cg_file_kb={} dirty_since={} last_auto_backup_at={}",
+                "backup started trigger={} rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_kb={} cg_file_kb={} cg_shmem_kb={} cg_file_mapped_kb={} cg_active_file_kb={} cg_inactive_file_kb={} cg_pgfault={} cg_pgmajfault={} cg_workingset_refault_file={} cg_workingset_activate_file={} dirty_since={} last_auto_backup_at={}",
                 trigger.as_str(),
                 mem_before.fmt_rss(),
                 mem_before.fmt_cg(),
+                mem_before.fmt_gap(),
                 mem_before.fmt_anon(),
                 mem_before.fmt_file(),
+                mem_before.fmt_shmem(),
+                mem_before.fmt_file_mapped(),
+                mem_before.fmt_active_file(),
+                mem_before.fmt_inactive_file(),
+                mem_before.fmt_pgfault(),
+                mem_before.fmt_pgmajfault(),
+                mem_before.fmt_workingset_refault_file(),
+                mem_before.fmt_workingset_activate_file(),
                 format_optional_datetime(dirty_since),
                 format_optional_datetime(last_auto_backup_at),
             ),
@@ -598,7 +585,7 @@ impl BackupCoordinator {
         let mut selected_remote_name = None::<String>;
         let mut snapshot_key_for_log: Option<String> = None;
         let mut archive_size_bytes = None;
-        let mut rss_after_archive_kb = None;
+        let mut mem_after_archive = MemSample::default();
         let mut mem_after_upload = MemSample::default();
         let mut mem_after_list = MemSample::default();
         let mut mem_after_delete = MemSample::default();
@@ -645,7 +632,7 @@ impl BackupCoordinator {
                 .context("failed to inspect temporary snapshot archive")?
                 .len();
             archive_size_bytes = Some(archive_size);
-            rss_after_archive_kb = process_rss_kb();
+            mem_after_archive = memdiag::sample_full();
             build_elapsed_ms = Some(started_at.elapsed().as_millis());
 
             for (index, remote) in backup.configured_remotes().into_iter().enumerate() {
@@ -702,13 +689,13 @@ impl BackupCoordinator {
                     client
                         .put_object_stream(&snapshot_key, &mut upload_file)
                         .await?;
-                    mem_after_upload = mem_sample();
+                    mem_after_upload = memdiag::sample_full();
                     upload_elapsed_ms = Some(upload_started_at.elapsed().as_millis());
 
                     let list_started_at = Instant::now();
                     let snapshots = client.list_snapshots().await?;
                     let listed_count = snapshots.len();
-                    mem_after_list = mem_sample();
+                    mem_after_list = memdiag::sample_full();
                     list_elapsed_ms = Some(list_started_at.elapsed().as_millis());
 
                     let delete_started_at = Instant::now();
@@ -717,7 +704,7 @@ impl BackupCoordinator {
                         client.delete_object(&snapshot.key).await?;
                         deleted_count += 1;
                     }
-                    mem_after_delete = mem_sample();
+                    mem_after_delete = memdiag::sample_full();
                     delete_elapsed_ms = Some(delete_started_at.elapsed().as_millis());
                     trim_summary = SnapshotTrimSummary {
                         listed_count,
@@ -725,7 +712,7 @@ impl BackupCoordinator {
                     };
 
                     drop(upload_file);
-                    mem_after_drop = mem_sample_full();
+                    mem_after_drop = memdiag::sample_full();
                     self.inner.state_store.set_latest(
                         Some(created_at.to_rfc3339()),
                         Some(snapshot_key.clone()),
@@ -801,7 +788,7 @@ impl BackupCoordinator {
         }
         .await;
 
-        let mem_final = mem_sample_full();
+        let mem_final = memdiag::sample_full();
         let cache_status = cache_status
             .map(|value| value.as_str())
             .unwrap_or("unknown");
@@ -834,23 +821,62 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "info",
                     format!(
-                        "backup metrics trigger={} rss_before_kb={} cg_before_kb={} cg_anon_before_kb={} cg_file_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} rss_after_list_kb={} cg_after_list_kb={} rss_after_delete_kb={} cg_after_delete_kb={} rss_after_drop_kb={} cg_after_drop_kb={} cg_anon_drop_kb={} cg_file_drop_kb={}",
+                        "backup metrics trigger={} rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_before_kb={} cg_file_before_kb={} cg_shmem_before_kb={} cg_file_mapped_before_kb={} cg_active_file_before_kb={} cg_inactive_file_before_kb={} rss_after_archive_kb={} cg_after_archive_kb={} gap_after_archive_kb={} cg_anon_after_archive_kb={} cg_file_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} gap_after_upload_kb={} cg_anon_after_upload_kb={} cg_file_after_upload_kb={} rss_after_list_kb={} cg_after_list_kb={} gap_after_list_kb={} cg_anon_after_list_kb={} cg_file_after_list_kb={} rss_after_delete_kb={} cg_after_delete_kb={} gap_after_delete_kb={} cg_anon_after_delete_kb={} cg_file_after_delete_kb={} rss_after_drop_kb={} cg_after_drop_kb={} gap_after_drop_kb={} cg_anon_drop_kb={} cg_file_drop_kb={} cg_shmem_drop_kb={} cg_file_mapped_drop_kb={} cg_active_file_drop_kb={} cg_inactive_file_drop_kb={} pgfault_delta={} pgmajfault_delta={} workingset_refault_file_delta={} workingset_activate_file_delta={}",
                         trigger.as_str(),
                         mem_before.fmt_rss(),
                         mem_before.fmt_cg(),
+                        mem_before.fmt_gap(),
                         mem_before.fmt_anon(),
                         mem_before.fmt_file(),
-                        format_optional_u64(rss_after_archive_kb),
+                        mem_before.fmt_shmem(),
+                        mem_before.fmt_file_mapped(),
+                        mem_before.fmt_active_file(),
+                        mem_before.fmt_inactive_file(),
+                        mem_after_archive.fmt_rss(),
+                        mem_after_archive.fmt_cg(),
+                        mem_after_archive.fmt_gap(),
+                        mem_after_archive.fmt_anon(),
+                        mem_after_archive.fmt_file(),
                         mem_after_upload.fmt_rss(),
                         mem_after_upload.fmt_cg(),
+                        mem_after_upload.fmt_gap(),
+                        mem_after_upload.fmt_anon(),
+                        mem_after_upload.fmt_file(),
                         mem_after_list.fmt_rss(),
                         mem_after_list.fmt_cg(),
+                        mem_after_list.fmt_gap(),
+                        mem_after_list.fmt_anon(),
+                        mem_after_list.fmt_file(),
                         mem_after_delete.fmt_rss(),
                         mem_after_delete.fmt_cg(),
+                        mem_after_delete.fmt_gap(),
+                        mem_after_delete.fmt_anon(),
+                        mem_after_delete.fmt_file(),
                         mem_after_drop.fmt_rss(),
                         mem_after_drop.fmt_cg(),
+                        mem_after_drop.fmt_gap(),
                         mem_after_drop.fmt_anon(),
                         mem_after_drop.fmt_file(),
+                        mem_after_drop.fmt_shmem(),
+                        mem_after_drop.fmt_file_mapped(),
+                        mem_after_drop.fmt_active_file(),
+                        mem_after_drop.fmt_inactive_file(),
+                        format_optional_u64(memdiag::counter_delta(
+                            mem_before.cg_pgfault,
+                            mem_after_drop.cg_pgfault,
+                        )),
+                        format_optional_u64(memdiag::counter_delta(
+                            mem_before.cg_pgmajfault,
+                            mem_after_drop.cg_pgmajfault,
+                        )),
+                        format_optional_u64(memdiag::counter_delta(
+                            mem_before.cg_workingset_refault_file,
+                            mem_after_drop.cg_workingset_refault_file,
+                        )),
+                        format_optional_u64(memdiag::counter_delta(
+                            mem_before.cg_workingset_activate_file,
+                            mem_after_drop.cg_workingset_activate_file,
+                        )),
                     ),
                 );
             }
@@ -874,20 +900,45 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "error",
                     format!(
-                        "backup failed trigger={} remote={} key={} cache={} rss_before_kb={} cg_before_kb={} rss_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} rss_final_kb={} cg_final_kb={} cg_anon_final_kb={} cg_file_final_kb={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={} err={err:#}",
+                        "backup failed trigger={} remote={} key={} cache={} rss_before_kb={} cg_before_kb={} gap_before_kb={} rss_after_archive_kb={} cg_after_archive_kb={} gap_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} gap_after_upload_kb={} rss_final_kb={} cg_final_kb={} gap_final_kb={} cg_anon_final_kb={} cg_file_final_kb={} cg_shmem_final_kb={} cg_file_mapped_final_kb={} cg_active_file_final_kb={} cg_inactive_file_final_kb={} pgfault_delta={} pgmajfault_delta={} workingset_refault_file_delta={} workingset_activate_file_delta={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={} err={err:#}",
                         trigger.as_str(),
                         remote_name,
                         snapshot_key,
                         cache_status,
                         mem_before.fmt_rss(),
                         mem_before.fmt_cg(),
-                        format_optional_u64(rss_after_archive_kb),
+                        mem_before.fmt_gap(),
+                        mem_after_archive.fmt_rss(),
+                        mem_after_archive.fmt_cg(),
+                        mem_after_archive.fmt_gap(),
                         mem_after_upload.fmt_rss(),
                         mem_after_upload.fmt_cg(),
+                        mem_after_upload.fmt_gap(),
                         mem_final.fmt_rss(),
                         mem_final.fmt_cg(),
+                        mem_final.fmt_gap(),
                         mem_final.fmt_anon(),
                         mem_final.fmt_file(),
+                        mem_final.fmt_shmem(),
+                        mem_final.fmt_file_mapped(),
+                        mem_final.fmt_active_file(),
+                        mem_final.fmt_inactive_file(),
+                        format_optional_u64(memdiag::counter_delta(
+                            mem_before.cg_pgfault,
+                            mem_final.cg_pgfault,
+                        )),
+                        format_optional_u64(memdiag::counter_delta(
+                            mem_before.cg_pgmajfault,
+                            mem_final.cg_pgmajfault,
+                        )),
+                        format_optional_u64(memdiag::counter_delta(
+                            mem_before.cg_workingset_refault_file,
+                            mem_final.cg_workingset_refault_file,
+                        )),
+                        format_optional_u64(memdiag::counter_delta(
+                            mem_before.cg_workingset_activate_file,
+                            mem_final.cg_workingset_activate_file,
+                        )),
                         archive_size_bytes,
                         trim_summary.listed_count,
                         trim_summary.deleted_count,
@@ -909,7 +960,7 @@ impl BackupCoordinator {
         snapshot_key: &str,
     ) -> Result<RestoreResult> {
         let started_at = Instant::now();
-        let rss_before_kb = process_rss_kb();
+        let rss_before_kb = memdiag::sample().rss_kb;
         let scheduler_status = self.inner.scheduler.status().await;
         if scheduler_status.manual_running || scheduler_status.manual_pending {
             bail!("手动全量刷新正在执行中，请等待其完成后重试");
@@ -958,7 +1009,7 @@ impl BackupCoordinator {
             result
         }
         .await;
-        let rss_after_kb = process_rss_kb();
+        let rss_after_kb = memdiag::sample().rss_kb;
         let cache_status = cache_status
             .map(|value| value.as_str())
             .unwrap_or("unknown");
@@ -1318,108 +1369,6 @@ fn display_config_value(value: &str) -> &str {
     if value.is_empty() { "-" } else { value }
 }
 
-fn process_rss_kb() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        parse_linux_proc_status_rss_kb(&status)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn parse_linux_proc_status_rss_kb(status: &str) -> Option<u64> {
-    status.lines().find_map(|line| {
-        let value = line.strip_prefix("VmRSS:")?.trim();
-        value.split_whitespace().next()?.parse::<u64>().ok()
-    })
-}
-
-fn cgroup_memory_current_kb() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.current") {
-            if let Ok(bytes) = s.trim().parse::<u64>() {
-                return Some(bytes / 1024);
-            }
-        }
-        if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes") {
-            if let Ok(bytes) = s.trim().parse::<u64>() {
-                return Some(bytes / 1024);
-            }
-        }
-        None
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-fn cgroup_memory_stat_anon_file_kb() -> (Option<u64>, Option<u64>) {
-    #[cfg(target_os = "linux")]
-    {
-        // cgroup v2: "anon" / "file"
-        if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory.stat") {
-            return parse_cgroup_stat_pair(&content, "anon", "file");
-        }
-        // cgroup v1: "rss" / "cache"
-        if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.stat") {
-            return parse_cgroup_stat_pair(&content, "rss", "cache");
-        }
-        (None, None)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        (None, None)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn parse_cgroup_stat_pair(content: &str, key_a: &str, key_b: &str) -> (Option<u64>, Option<u64>) {
-    let mut a = None;
-    let mut b = None;
-    for line in content.lines() {
-        let mut parts = line.split_whitespace();
-        if let Some(key) = parts.next() {
-            let value = parts
-                .next()
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|v| v / 1024);
-            if key == key_a && a.is_none() {
-                a = value;
-            } else if key == key_b && b.is_none() {
-                b = value;
-            }
-        }
-        if a.is_some() && b.is_some() {
-            break;
-        }
-    }
-    (a, b)
-}
-
-fn mem_sample() -> MemSample {
-    MemSample {
-        rss_kb: process_rss_kb(),
-        cg_kb: cgroup_memory_current_kb(),
-        ..MemSample::default()
-    }
-}
-
-fn mem_sample_full() -> MemSample {
-    let (anon, file) = cgroup_memory_stat_anon_file_kb();
-    MemSample {
-        rss_kb: process_rss_kb(),
-        cg_kb: cgroup_memory_current_kb(),
-        cg_anon_kb: anon,
-        cg_file_kb: file,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -1531,15 +1480,5 @@ mod tests {
         assert!(!should_fail_snapshot_listing(1, 0));
         assert!(!should_fail_snapshot_listing(0, 0));
         assert!(should_fail_snapshot_listing(0, 1));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn parses_linux_proc_status_rss() {
-        let rss = parse_linux_proc_status_rss_kb(
-            "Name:\ttoken-refresh\nState:\tS (sleeping)\nVmRSS:\t   14336 kB\nThreads:\t7\n",
-        );
-
-        assert_eq!(rss, Some(14336));
     }
 }

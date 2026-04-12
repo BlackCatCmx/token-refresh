@@ -16,6 +16,7 @@ pub mod import;
 pub mod jwt;
 pub mod lockfile;
 pub mod logging;
+pub mod memdiag;
 pub mod originator;
 pub mod proxy;
 pub mod recovery;

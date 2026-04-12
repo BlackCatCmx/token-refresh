@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -8,6 +9,7 @@ use crate::credential::CodexCredentialFile;
 use crate::credential_store::{CredentialStore, CredentialZone};
 use crate::jwt;
 use crate::logging::LogManager;
+use crate::memdiag::{self, MemSample};
 use crate::recovery;
 use crate::refresh_client::{
     RefreshClient, RefreshFailure, RefreshResponsePayload, RefreshSuccess,
@@ -48,6 +50,12 @@ pub struct RefreshOutcome {
     pub key: String,
     pub message: String,
     pub failure_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RefreshMemContext {
+    started_at: Instant,
+    before: MemSample,
 }
 
 impl RefreshTransaction {
@@ -123,6 +131,10 @@ impl RefreshTransaction {
                 .await;
         }
 
+        let mem_context = RefreshMemContext {
+            started_at: Instant::now(),
+            before: memdiag::sample_full(),
+        };
         self.logger.runtime(
             "info",
             format!(
@@ -136,6 +148,7 @@ impl RefreshTransaction {
                 config.network.timeout.trim()
             ),
         )?;
+        let _ = self.log_refresh_mem_start(zone, key, trigger, &mem_context.before);
 
         let request_user_agent =
             match crate::user_agent::normalize_optional(credential.normalized_user_agent()) {
@@ -155,15 +168,29 @@ impl RefreshTransaction {
                 }
             };
 
-        let refresh_result = self
+        let refresh_result = match self
             .refresh_with_proxy_fallback(
                 config,
                 credential.refresh_token.trim(),
                 &request_user_agent,
                 key,
             )
-            .await?;
-        match refresh_result {
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                let _ = self.log_refresh_mem_finish(
+                    key,
+                    trigger,
+                    zone.as_str(),
+                    zone.as_str(),
+                    "error",
+                    &mem_context,
+                );
+                return Err(err);
+            }
+        };
+        let outcome = match refresh_result {
             Ok(payload) => {
                 self.handle_success(
                     config,
@@ -180,7 +207,23 @@ impl RefreshTransaction {
                 self.handle_failure(config, zone, key, trigger, generation, error)
                     .await
             }
-        }
+        };
+        let (outcome_label, final_zone) = match &outcome {
+            Ok(result) => (
+                if result.success { "success" } else { "failure" },
+                result.zone.as_str(),
+            ),
+            Err(_) => ("error", zone.as_str()),
+        };
+        let _ = self.log_refresh_mem_finish(
+            key,
+            trigger,
+            zone.as_str(),
+            final_zone,
+            outcome_label,
+            &mem_context,
+        );
+        outcome
     }
 
     async fn handle_success(
@@ -432,6 +475,95 @@ impl RefreshTransaction {
             message: error.reason.clone(),
             failure_code: Some(error.code),
         })
+    }
+
+    fn log_refresh_mem_start(
+        &self,
+        zone: CredentialZone,
+        key: &str,
+        trigger: RefreshTrigger,
+        mem_before: &MemSample,
+    ) -> Result<()> {
+        self.logger.runtime(
+            "info",
+            format!(
+                "refresh mem start key={} zone={} trigger={} rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_kb={} cg_file_kb={} cg_shmem_kb={} cg_file_mapped_kb={} cg_active_file_kb={} cg_inactive_file_kb={} cg_pgfault={} cg_pgmajfault={} cg_workingset_refault_file={} cg_workingset_activate_file={}",
+                key,
+                zone.as_str(),
+                trigger.as_str(),
+                mem_before.fmt_rss(),
+                mem_before.fmt_cg(),
+                mem_before.fmt_gap(),
+                mem_before.fmt_anon(),
+                mem_before.fmt_file(),
+                mem_before.fmt_shmem(),
+                mem_before.fmt_file_mapped(),
+                mem_before.fmt_active_file(),
+                mem_before.fmt_inactive_file(),
+                mem_before.fmt_pgfault(),
+                mem_before.fmt_pgmajfault(),
+                mem_before.fmt_workingset_refault_file(),
+                mem_before.fmt_workingset_activate_file(),
+            ),
+        )
+    }
+
+    fn log_refresh_mem_finish(
+        &self,
+        key: &str,
+        trigger: RefreshTrigger,
+        zone_before: &str,
+        zone_after: &str,
+        outcome: &str,
+        mem_context: &RefreshMemContext,
+    ) -> Result<()> {
+        let mem_after = memdiag::sample_full();
+        self.logger.runtime(
+            "info",
+            format!(
+                "refresh metrics trigger={} outcome={} key={} zone_before={} zone_after={} elapsed_ms={} rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_before_kb={} cg_file_before_kb={} cg_shmem_before_kb={} cg_file_mapped_before_kb={} cg_active_file_before_kb={} cg_inactive_file_before_kb={} rss_after_kb={} cg_after_kb={} gap_after_kb={} cg_anon_after_kb={} cg_file_after_kb={} cg_shmem_after_kb={} cg_file_mapped_after_kb={} cg_active_file_after_kb={} cg_inactive_file_after_kb={} pgfault_delta={} pgmajfault_delta={} workingset_refault_file_delta={} workingset_activate_file_delta={}",
+                trigger.as_str(),
+                outcome,
+                key,
+                zone_before,
+                zone_after,
+                mem_context.started_at.elapsed().as_millis(),
+                mem_context.before.fmt_rss(),
+                mem_context.before.fmt_cg(),
+                mem_context.before.fmt_gap(),
+                mem_context.before.fmt_anon(),
+                mem_context.before.fmt_file(),
+                mem_context.before.fmt_shmem(),
+                mem_context.before.fmt_file_mapped(),
+                mem_context.before.fmt_active_file(),
+                mem_context.before.fmt_inactive_file(),
+                mem_after.fmt_rss(),
+                mem_after.fmt_cg(),
+                mem_after.fmt_gap(),
+                mem_after.fmt_anon(),
+                mem_after.fmt_file(),
+                mem_after.fmt_shmem(),
+                mem_after.fmt_file_mapped(),
+                mem_after.fmt_active_file(),
+                mem_after.fmt_inactive_file(),
+                memdiag::format_optional_u64(memdiag::counter_delta(
+                    mem_context.before.cg_pgfault,
+                    mem_after.cg_pgfault,
+                )),
+                memdiag::format_optional_u64(memdiag::counter_delta(
+                    mem_context.before.cg_pgmajfault,
+                    mem_after.cg_pgmajfault,
+                )),
+                memdiag::format_optional_u64(memdiag::counter_delta(
+                    mem_context.before.cg_workingset_refault_file,
+                    mem_after.cg_workingset_refault_file,
+                )),
+                memdiag::format_optional_u64(memdiag::counter_delta(
+                    mem_context.before.cg_workingset_activate_file,
+                    mem_after.cg_workingset_activate_file,
+                )),
+            ),
+        )
     }
 }
 
