@@ -17,6 +17,13 @@ pub struct MemSample {
     pub cg_workingset_activate_file: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CounterDelta {
+    Missing,
+    Value(u64),
+    Reset(u64),
+}
+
 impl MemSample {
     pub fn rss_minus_cg_kb(&self) -> Option<i64> {
         Some(self.rss_kb? as i64 - self.cg_kb? as i64)
@@ -123,8 +130,38 @@ pub fn sample_full() -> MemSample {
     }
 }
 
-pub fn counter_delta(before: Option<u64>, after: Option<u64>) -> Option<u64> {
-    Some(after?.checked_sub(before?)?)
+pub fn sample_anon_file() -> MemSample {
+    #[cfg(target_os = "linux")]
+    {
+        let (anon, file) = cgroup_memory_stat_pair_kb();
+        return MemSample {
+            rss_kb: process_rss_kb(),
+            cg_kb: cgroup_memory_current_kb(),
+            cg_anon_kb: anon,
+            cg_file_kb: file,
+            ..MemSample::default()
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        sample()
+    }
+}
+
+pub fn counter_delta(before: Option<u64>, after: Option<u64>) -> CounterDelta {
+    match (before, after) {
+        (Some(before), Some(after)) if after >= before => CounterDelta::Value(after - before),
+        (Some(before), Some(after)) => CounterDelta::Reset(before - after),
+        _ => CounterDelta::Missing,
+    }
+}
+
+pub fn format_counter_delta(value: CounterDelta) -> String {
+    match value {
+        CounterDelta::Missing => "na".to_string(),
+        CounterDelta::Value(value) => value.to_string(),
+        CounterDelta::Reset(value) => format!("reset:{value}"),
+    }
 }
 
 pub fn format_optional_u64(value: Option<u64>) -> String {
@@ -181,6 +218,17 @@ fn cgroup_memory_current_kb() -> Option<u64> {
 }
 
 #[cfg(target_os = "linux")]
+fn cgroup_memory_stat_pair_kb() -> (Option<u64>, Option<u64>) {
+    if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory.stat") {
+        return parse_cgroup_stat_pair(&content, "anon", "file");
+    }
+    if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.stat") {
+        return parse_cgroup_stat_pair(&content, "rss", "cache");
+    }
+    (None, None)
+}
+
+#[cfg(target_os = "linux")]
 fn cgroup_memory_stat_map() -> Option<HashMap<String, u64>> {
     if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/memory.stat") {
         return Some(parse_cgroup_stat_map(&content));
@@ -208,6 +256,30 @@ fn parse_cgroup_stat_map(content: &str) -> HashMap<String, u64> {
         values.insert(key.to_string(), value);
     }
     values
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_stat_pair(content: &str, key_a: &str, key_b: &str) -> (Option<u64>, Option<u64>) {
+    let mut a = None;
+    let mut b = None;
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        if let Some(key) = parts.next() {
+            let value = parts
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|v| v / 1024);
+            if key == key_a && a.is_none() {
+                a = value;
+            } else if key == key_b && b.is_none() {
+                b = value;
+            }
+        }
+        if a.is_some() && b.is_some() {
+            break;
+        }
+    }
+    (a, b)
 }
 
 #[cfg(target_os = "linux")]
@@ -301,7 +373,12 @@ mod tests {
 
     #[test]
     fn computes_counter_delta() {
-        assert_eq!(counter_delta(Some(10), Some(42)), Some(32));
-        assert_eq!(counter_delta(Some(10), None), None);
+        assert_eq!(counter_delta(Some(10), Some(42)), CounterDelta::Value(32));
+        assert_eq!(counter_delta(Some(42), Some(10)), CounterDelta::Reset(32));
+        assert_eq!(counter_delta(Some(10), None), CounterDelta::Missing);
+        assert_eq!(
+            format_counter_delta(counter_delta(Some(42), Some(10))),
+            "reset:32"
+        );
     }
 }

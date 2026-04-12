@@ -689,13 +689,13 @@ impl BackupCoordinator {
                     client
                         .put_object_stream(&snapshot_key, &mut upload_file)
                         .await?;
-                    mem_after_upload = memdiag::sample_full();
+                    mem_after_upload = memdiag::sample_anon_file();
                     upload_elapsed_ms = Some(upload_started_at.elapsed().as_millis());
 
                     let list_started_at = Instant::now();
                     let snapshots = client.list_snapshots().await?;
                     let listed_count = snapshots.len();
-                    mem_after_list = memdiag::sample_full();
+                    mem_after_list = memdiag::sample_anon_file();
                     list_elapsed_ms = Some(list_started_at.elapsed().as_millis());
 
                     let delete_started_at = Instant::now();
@@ -704,7 +704,7 @@ impl BackupCoordinator {
                         client.delete_object(&snapshot.key).await?;
                         deleted_count += 1;
                     }
-                    mem_after_delete = memdiag::sample_full();
+                    mem_after_delete = memdiag::sample_anon_file();
                     delete_elapsed_ms = Some(delete_started_at.elapsed().as_millis());
                     trim_summary = SnapshotTrimSummary {
                         listed_count,
@@ -861,19 +861,19 @@ impl BackupCoordinator {
                         mem_after_drop.fmt_file_mapped(),
                         mem_after_drop.fmt_active_file(),
                         mem_after_drop.fmt_inactive_file(),
-                        format_optional_u64(memdiag::counter_delta(
+                        memdiag::format_counter_delta(memdiag::counter_delta(
                             mem_before.cg_pgfault,
                             mem_after_drop.cg_pgfault,
                         )),
-                        format_optional_u64(memdiag::counter_delta(
+                        memdiag::format_counter_delta(memdiag::counter_delta(
                             mem_before.cg_pgmajfault,
                             mem_after_drop.cg_pgmajfault,
                         )),
-                        format_optional_u64(memdiag::counter_delta(
+                        memdiag::format_counter_delta(memdiag::counter_delta(
                             mem_before.cg_workingset_refault_file,
                             mem_after_drop.cg_workingset_refault_file,
                         )),
-                        format_optional_u64(memdiag::counter_delta(
+                        memdiag::format_counter_delta(memdiag::counter_delta(
                             mem_before.cg_workingset_activate_file,
                             mem_after_drop.cg_workingset_activate_file,
                         )),
@@ -923,19 +923,19 @@ impl BackupCoordinator {
                         mem_final.fmt_file_mapped(),
                         mem_final.fmt_active_file(),
                         mem_final.fmt_inactive_file(),
-                        format_optional_u64(memdiag::counter_delta(
+                        memdiag::format_counter_delta(memdiag::counter_delta(
                             mem_before.cg_pgfault,
                             mem_final.cg_pgfault,
                         )),
-                        format_optional_u64(memdiag::counter_delta(
+                        memdiag::format_counter_delta(memdiag::counter_delta(
                             mem_before.cg_pgmajfault,
                             mem_final.cg_pgmajfault,
                         )),
-                        format_optional_u64(memdiag::counter_delta(
+                        memdiag::format_counter_delta(memdiag::counter_delta(
                             mem_before.cg_workingset_refault_file,
                             mem_final.cg_workingset_refault_file,
                         )),
-                        format_optional_u64(memdiag::counter_delta(
+                        memdiag::format_counter_delta(memdiag::counter_delta(
                             mem_before.cg_workingset_activate_file,
                             mem_final.cg_workingset_activate_file,
                         )),

@@ -138,17 +138,29 @@ impl RefreshTransaction {
         self.logger.runtime(
             "info",
             format!(
-                "refresh starting for {} in {} via {} (expires_at={}, last_refresh={}, proxy_mode={}, timeout={})",
+                "refresh starting for {} in {} via {} (expires_at={}, last_refresh={}, proxy_mode={}, timeout={}, rss_before_kb={}, cg_before_kb={}, gap_before_kb={}, cg_anon_kb={}, cg_file_kb={}, cg_shmem_kb={}, cg_file_mapped_kb={}, cg_active_file_kb={}, cg_inactive_file_kb={}, cg_pgfault={}, cg_pgmajfault={}, cg_workingset_refault_file={}, cg_workingset_activate_file={})",
                 key,
                 zone.as_str(),
                 trigger.as_str(),
                 credential.expired.as_deref().unwrap_or("-"),
                 credential.last_refresh.as_deref().unwrap_or("-"),
                 config.proxy.mode.trim(),
-                config.network.timeout.trim()
+                config.network.timeout.trim(),
+                mem_context.before.fmt_rss(),
+                mem_context.before.fmt_cg(),
+                mem_context.before.fmt_gap(),
+                mem_context.before.fmt_anon(),
+                mem_context.before.fmt_file(),
+                mem_context.before.fmt_shmem(),
+                mem_context.before.fmt_file_mapped(),
+                mem_context.before.fmt_active_file(),
+                mem_context.before.fmt_inactive_file(),
+                mem_context.before.fmt_pgfault(),
+                mem_context.before.fmt_pgmajfault(),
+                mem_context.before.fmt_workingset_refault_file(),
+                mem_context.before.fmt_workingset_activate_file(),
             ),
         )?;
-        let _ = self.log_refresh_mem_start(zone, key, trigger, &mem_context.before);
 
         let request_user_agent =
             match crate::user_agent::normalize_optional(credential.normalized_user_agent()) {
@@ -477,37 +489,6 @@ impl RefreshTransaction {
         })
     }
 
-    fn log_refresh_mem_start(
-        &self,
-        zone: CredentialZone,
-        key: &str,
-        trigger: RefreshTrigger,
-        mem_before: &MemSample,
-    ) -> Result<()> {
-        self.logger.runtime(
-            "info",
-            format!(
-                "refresh mem start key={} zone={} trigger={} rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_kb={} cg_file_kb={} cg_shmem_kb={} cg_file_mapped_kb={} cg_active_file_kb={} cg_inactive_file_kb={} cg_pgfault={} cg_pgmajfault={} cg_workingset_refault_file={} cg_workingset_activate_file={}",
-                key,
-                zone.as_str(),
-                trigger.as_str(),
-                mem_before.fmt_rss(),
-                mem_before.fmt_cg(),
-                mem_before.fmt_gap(),
-                mem_before.fmt_anon(),
-                mem_before.fmt_file(),
-                mem_before.fmt_shmem(),
-                mem_before.fmt_file_mapped(),
-                mem_before.fmt_active_file(),
-                mem_before.fmt_inactive_file(),
-                mem_before.fmt_pgfault(),
-                mem_before.fmt_pgmajfault(),
-                mem_before.fmt_workingset_refault_file(),
-                mem_before.fmt_workingset_activate_file(),
-            ),
-        )
-    }
-
     fn log_refresh_mem_finish(
         &self,
         key: &str,
@@ -546,19 +527,19 @@ impl RefreshTransaction {
                 mem_after.fmt_file_mapped(),
                 mem_after.fmt_active_file(),
                 mem_after.fmt_inactive_file(),
-                memdiag::format_optional_u64(memdiag::counter_delta(
+                memdiag::format_counter_delta(memdiag::counter_delta(
                     mem_context.before.cg_pgfault,
                     mem_after.cg_pgfault,
                 )),
-                memdiag::format_optional_u64(memdiag::counter_delta(
+                memdiag::format_counter_delta(memdiag::counter_delta(
                     mem_context.before.cg_pgmajfault,
                     mem_after.cg_pgmajfault,
                 )),
-                memdiag::format_optional_u64(memdiag::counter_delta(
+                memdiag::format_counter_delta(memdiag::counter_delta(
                     mem_context.before.cg_workingset_refault_file,
                     mem_after.cg_workingset_refault_file,
                 )),
-                memdiag::format_optional_u64(memdiag::counter_delta(
+                memdiag::format_counter_delta(memdiag::counter_delta(
                     mem_context.before.cg_workingset_activate_file,
                     mem_after.cg_workingset_activate_file,
                 )),
