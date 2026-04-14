@@ -305,7 +305,7 @@ impl RefreshTransaction {
         user_agent: &str,
         key: &str,
     ) -> Result<std::result::Result<RefreshSuccess, RefreshFailure>> {
-        let proxies = match crate::proxy::validate_proxy_list(&config.proxy.list) {
+        let primary_proxies = match crate::proxy::validate_proxy_list(&config.proxy.list) {
             Ok(value) => value,
             Err(err) => {
                 return Ok(Err(RefreshFailure::transient(
@@ -314,87 +314,79 @@ impl RefreshTransaction {
                 )));
             }
         };
-        let proxy_count = proxies.len();
-        if proxy_count == 0 {
-            return Ok(self
-                .client
-                .refresh_with_proxy(config, refresh_token, user_agent, None)
-                .await);
-        }
+        let backup_proxies = match crate::proxy::validate_proxy_list(&config.proxy.backup_list) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(Err(RefreshFailure::transient(
+                    "invalid_backup_proxy_list",
+                    err.to_string(),
+                )));
+            }
+        };
 
         let mode = config.proxy.mode.trim();
-        match mode {
-            "fixed" => {
-                let proxy = proxies[0].clone();
-                let first_attempt = self
-                    .client
-                    .refresh_with_proxy(config, refresh_token, user_agent, Some(&proxy))
-                    .await;
-                match first_attempt {
-                    Ok(payload) => Ok(Ok(payload)),
-                    Err(error) if should_fallback_due_to_proxy_connect(&error) => {
-                        let proxy_host =
-                            error.proxy_host.clone().unwrap_or_else(|| "-".to_string());
-                        runtime_warn_best_effort(
-                            self.logger.as_ref(),
-                            format!(
-                                "代理连接失败，回退到直连 (key={}, proxy={})",
-                                key, proxy_host
-                            ),
-                        );
-                        Ok(self
-                            .client
-                            .refresh_with_proxy(config, refresh_token, user_agent, None)
-                            .await)
-                    }
-                    Err(error) => Ok(Err(error)),
-                }
+        let primary_start_index = if mode == "round_robin" && !primary_proxies.is_empty() {
+            self.client
+                .reserve_proxy_index_from_list(mode, &primary_proxies)?
+        } else {
+            None
+        };
+        let attempt_sequence = match build_proxy_attempt_sequence(
+            mode,
+            &primary_proxies,
+            &backup_proxies,
+            primary_start_index,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(Err(RefreshFailure::transient(
+                    "invalid_proxy_mode",
+                    err.to_string(),
+                )));
             }
-            "round_robin" => {
-                let start_index = self
-                    .client
-                    .reserve_proxy_index_from_list(mode, &proxies)?
-                    .expect("invariant: proxy_count > 0");
-                for attempt in 0..proxy_count {
-                    let proxy = proxies[(start_index + attempt) % proxy_count].clone();
-                    let attempt_result = self
-                        .client
-                        .refresh_with_proxy(config, refresh_token, user_agent, Some(&proxy))
-                        .await;
-                    match attempt_result {
-                        Ok(payload) => return Ok(Ok(payload)),
-                        Err(error) if should_fallback_due_to_proxy_connect(&error) => {
-                            let proxy_host =
-                                error.proxy_host.clone().unwrap_or_else(|| "-".to_string());
-                            if attempt + 1 < proxy_count {
-                                runtime_warn_best_effort(
-                                    self.logger.as_ref(),
-                                    format!(
-                                        "代理连接失败，切换下一条代理 (key={}, proxy={})",
-                                        key, proxy_host
-                                    ),
-                                );
-                                continue;
-                            }
-                            runtime_warn_best_effort(
-                                self.logger.as_ref(),
-                                format!(
-                                    "全部代理连接失败，回退到直连 (key={}, proxy={})",
-                                    key, proxy_host
-                                ),
-                            );
-                            break;
-                        }
-                        Err(error) => return Ok(Err(error)),
-                    }
+        };
+
+        for (index, attempt) in attempt_sequence.iter().enumerate() {
+            let attempt_result = match attempt {
+                ProxyAttempt::Primary(proxy) | ProxyAttempt::Backup(proxy) => {
+                    self.client
+                        .refresh_with_proxy(config, refresh_token, user_agent, Some(proxy))
+                        .await
                 }
-                Ok(self
-                    .client
-                    .refresh_with_proxy(config, refresh_token, user_agent, None)
-                    .await)
+                ProxyAttempt::Direct => {
+                    self.client
+                        .refresh_with_proxy(config, refresh_token, user_agent, None)
+                        .await
+                }
+            };
+            match attempt_result {
+                Ok(payload) => return Ok(Ok(payload)),
+                Err(error) if should_fallback_due_to_proxy_connect(&error) => {
+                    let Some(next_attempt) = attempt_sequence.get(index + 1) else {
+                        return Ok(Err(error));
+                    };
+                    if let Err(err) = log_proxy_fallback_transition(
+                        self.logger.as_ref(),
+                        key,
+                        attempt,
+                        next_attempt,
+                        error.proxy_host.as_deref(),
+                    ) {
+                        return Ok(Err(RefreshFailure::transient(
+                            "internal_error",
+                            err.to_string(),
+                        )));
+                    }
+                    continue;
+                }
+                Err(error) => return Ok(Err(error)),
             }
-            _ => Ok(self.client.refresh(config, refresh_token, user_agent).await),
         }
+
+        Ok(Err(RefreshFailure::transient(
+            "internal_error",
+            "proxy attempt sequence did not terminate with Direct",
+        )))
     }
 
     async fn handle_failure(
@@ -552,6 +544,95 @@ fn should_fallback_due_to_proxy_connect(error: &RefreshFailure) -> bool {
     error.code == "network_connect_failed" && error.proxy_host.is_some()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProxyAttempt {
+    Primary(String),
+    Backup(String),
+    Direct,
+}
+
+fn build_proxy_attempt_sequence(
+    mode: &str,
+    primary_proxies: &[String],
+    backup_proxies: &[String],
+    primary_start_index: Option<usize>,
+) -> Result<Vec<ProxyAttempt>> {
+    let mut attempts = Vec::new();
+    match mode {
+        "fixed" => {
+            if let Some(proxy) = primary_proxies.first() {
+                attempts.push(ProxyAttempt::Primary(proxy.clone()));
+            }
+        }
+        "round_robin" => {
+            if !primary_proxies.is_empty() {
+                let start_index =
+                    primary_start_index.expect("invariant: round_robin primary index is reserved");
+                for offset in 0..primary_proxies.len() {
+                    let proxy =
+                        primary_proxies[(start_index + offset) % primary_proxies.len()].clone();
+                    attempts.push(ProxyAttempt::Primary(proxy));
+                }
+            }
+        }
+        other => anyhow::bail!("unsupported proxy mode: {other}"),
+    }
+    attempts.extend(backup_proxies.iter().cloned().map(ProxyAttempt::Backup));
+    attempts.push(ProxyAttempt::Direct);
+    Ok(attempts)
+}
+
+fn log_proxy_fallback_transition(
+    logger: &LogManager,
+    key: &str,
+    current: &ProxyAttempt,
+    next: &ProxyAttempt,
+    proxy_host: Option<&str>,
+) -> Result<()> {
+    let proxy_host = proxy_host.unwrap_or("-");
+    let message = match (current, next) {
+        (ProxyAttempt::Primary(_), ProxyAttempt::Primary(_)) => {
+            format!(
+                "主代理连接失败，切换下一条主代理 (key={}, proxy={})",
+                key, proxy_host
+            )
+        }
+        (ProxyAttempt::Primary(_), ProxyAttempt::Backup(_)) => {
+            format!(
+                "主代理连接失败，切换备用代理 (key={}, proxy={})",
+                key, proxy_host
+            )
+        }
+        (ProxyAttempt::Primary(_), ProxyAttempt::Direct) => {
+            format!(
+                "主代理连接失败，回退到直连 (key={}, proxy={})",
+                key, proxy_host
+            )
+        }
+        (ProxyAttempt::Backup(_), ProxyAttempt::Backup(_)) => {
+            format!(
+                "备用代理连接失败，切换下一条备用代理 (key={}, proxy={})",
+                key, proxy_host
+            )
+        }
+        (ProxyAttempt::Backup(_), ProxyAttempt::Direct) => {
+            format!(
+                "备用代理连接失败，回退到直连 (key={}, proxy={})",
+                key, proxy_host
+            )
+        }
+        (ProxyAttempt::Direct, _) | (ProxyAttempt::Backup(_), ProxyAttempt::Primary(_)) => {
+            anyhow::bail!(
+                "unexpected proxy fallback transition: {:?} -> {:?}",
+                current,
+                next
+            )
+        }
+    };
+    runtime_warn_best_effort(logger, message);
+    Ok(())
+}
+
 fn runtime_warn_best_effort(logger: &LogManager, message: impl AsRef<str>) {
     let _ = logger.runtime("warn", message);
 }
@@ -613,6 +694,8 @@ pub fn due_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use base64::Engine;
     use serde_json::json;
 
@@ -621,6 +704,24 @@ mod tests {
         let payload =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
         format!("{header}.{payload}.sig")
+    }
+
+    fn test_config_with_temp_dirs(root: &std::path::Path) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.credentials_dir = root.join("credentials");
+        config.abnormal_credentials_dir = root.join("credentials_abnormal");
+        config.state_dir = root.join("state");
+        config
+    }
+
+    fn test_transaction(root: &std::path::Path) -> RefreshTransaction {
+        let config = test_config_with_temp_dirs(root);
+        let logger = Arc::new(LogManager::new(root, 1024, "info").unwrap());
+        let store = Arc::new(CredentialStore::new(&config, Some(logger.clone())).unwrap());
+        let status_store =
+            Arc::new(CredentialStatusStore::load(config.state_dir.join("status.json")).unwrap());
+        let write_coordinator = Arc::new(WriteCoordinator::new());
+        RefreshTransaction::new(store, status_store, logger, write_coordinator)
     }
 
     #[test]
@@ -733,6 +834,128 @@ mod tests {
         assert_eq!(
             proxy_attempt_label(Some("127.0.0.1:10808")),
             "127.0.0.1:10808"
+        );
+    }
+
+    #[test]
+    fn build_proxy_attempt_sequence_uses_backup_after_fixed_proxy() {
+        let attempts = build_proxy_attempt_sequence(
+            "fixed",
+            &[
+                "socks5://127.0.0.1:10808".to_string(),
+                "socks5://127.0.0.1:10809".to_string(),
+            ],
+            &[
+                "socks5://127.0.0.1:10818".to_string(),
+                "socks5://127.0.0.1:10819".to_string(),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            attempts,
+            vec![
+                ProxyAttempt::Primary("socks5://127.0.0.1:10808".to_string()),
+                ProxyAttempt::Backup("socks5://127.0.0.1:10818".to_string()),
+                ProxyAttempt::Backup("socks5://127.0.0.1:10819".to_string()),
+                ProxyAttempt::Direct,
+            ]
+        );
+    }
+
+    #[test]
+    fn build_proxy_attempt_sequence_round_robin_keeps_backup_after_primary_cycle() {
+        let attempts = build_proxy_attempt_sequence(
+            "round_robin",
+            &[
+                "socks5://127.0.0.1:10808".to_string(),
+                "socks5://127.0.0.1:10809".to_string(),
+                "socks5://127.0.0.1:10810".to_string(),
+            ],
+            &["socks5://127.0.0.1:10818".to_string()],
+            Some(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            attempts,
+            vec![
+                ProxyAttempt::Primary("socks5://127.0.0.1:10809".to_string()),
+                ProxyAttempt::Primary("socks5://127.0.0.1:10810".to_string()),
+                ProxyAttempt::Primary("socks5://127.0.0.1:10808".to_string()),
+                ProxyAttempt::Backup("socks5://127.0.0.1:10818".to_string()),
+                ProxyAttempt::Direct,
+            ]
+        );
+    }
+
+    #[test]
+    fn build_proxy_attempt_sequence_uses_backup_when_primary_is_empty() {
+        let attempts = build_proxy_attempt_sequence(
+            "fixed",
+            &[],
+            &[
+                "socks5://127.0.0.1:10818".to_string(),
+                "socks5://127.0.0.1:10819".to_string(),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            attempts,
+            vec![
+                ProxyAttempt::Backup("socks5://127.0.0.1:10818".to_string()),
+                ProxyAttempt::Backup("socks5://127.0.0.1:10819".to_string()),
+                ProxyAttempt::Direct,
+            ]
+        );
+    }
+
+    #[test]
+    fn build_proxy_attempt_sequence_rejects_unknown_mode() {
+        let error = build_proxy_attempt_sequence("random", &[], &[], None).unwrap_err();
+
+        assert!(error.to_string().contains("unsupported proxy mode"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_with_proxy_fallback_rejects_unknown_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let transaction = test_transaction(temp.path());
+        let mut config = test_config_with_temp_dirs(temp.path());
+        config.proxy.mode = "random".to_string();
+        config.proxy.list = "socks5://127.0.0.1:10808".to_string();
+
+        let result = transaction
+            .refresh_with_proxy_fallback(&config, "refresh-token", "user-agent", "demo.json")
+            .await
+            .unwrap();
+        let error = result.unwrap_err();
+
+        assert_eq!(error.code, "invalid_proxy_mode");
+        assert!(error.reason.contains("unsupported proxy mode"));
+    }
+
+    #[test]
+    fn log_proxy_fallback_transition_rejects_impossible_transition() {
+        let temp = tempfile::tempdir().unwrap();
+        let logger = LogManager::new(temp.path(), 1024, "info").unwrap();
+
+        let error = log_proxy_fallback_transition(
+            &logger,
+            "demo.json",
+            &ProxyAttempt::Backup("socks5://127.0.0.1:10818".to_string()),
+            &ProxyAttempt::Primary("socks5://127.0.0.1:10808".to_string()),
+            Some("127.0.0.1:10818"),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected proxy fallback transition")
         );
     }
 }

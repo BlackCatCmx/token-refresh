@@ -32,6 +32,7 @@ proxy:
   mode: "fixed"
   list: |
     socks5://127.0.0.1:10808
+  backup_list: ""
 
 credential_management:
   abnormal_threshold: 1

@@ -405,6 +405,7 @@ async function loadSettings(rerenderCredentials = false) {
   document.getElementById("max-file-size").value = data.settings.logging.max_file_size;
   document.getElementById("proxy-mode").value = data.settings.proxy.mode;
   document.getElementById("proxy-list").value = data.settings.proxy.list;
+  document.getElementById("proxy-backup-list").value = data.settings.proxy.backup_list;
   document.getElementById("abnormal-threshold").value = data.settings.credential_management.abnormal_threshold;
   applyCredentialPageSize(data.settings.credential_management.credential_page_size, rerenderCredentials);
   document.getElementById("refresh-interval").value = data.settings.refresh.interval;
@@ -424,7 +425,7 @@ async function loadSettings(rerenderCredentials = false) {
   syncUserAgentMode();
   renderHeaderPreview(data.header_preview);
   document.getElementById("settings-meta").textContent = `配置文件: ${data.config_path} | 环境变量锁定项: ${data.locked_fields.join(", ") || "无"}`;
-  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "abnormal-threshold", "credential-page-size", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout", "backup-enabled", "backup-daily-enabled", "backup-after-refresh-enabled", "backup-after-refresh-debounce", "backup-min-auto-interval"]) {
+  for (const field of ["originator", "user-agent-mode", "user-agent", "user-agent-versions", "user-agent-profiles", "user-agent-terminals", "log-level", "max-file-size", "proxy-mode", "proxy-list", "proxy-backup-list", "abnormal-threshold", "credential-page-size", "refresh-interval", "lead-time", "auto-delay-min", "auto-delay-max", "manual-delay-min", "manual-delay-max", "failure-backoff", "network-timeout", "backup-enabled", "backup-daily-enabled", "backup-after-refresh-enabled", "backup-after-refresh-debounce", "backup-min-auto-interval"]) {
     document.getElementById(field).disabled = false;
   }
   backupRemotesLocked = false;
@@ -442,6 +443,7 @@ async function loadSettings(rerenderCredentials = false) {
     "logging.max_file_size": ["max-file-size"],
     "proxy.mode": ["proxy-mode"],
     "proxy.list": ["proxy-list"],
+    "proxy.backup_list": ["proxy-backup-list"],
     "credential_management.abnormal_threshold": ["abnormal-threshold"],
     "credential_management.credential_page_size": ["credential-page-size"],
     "refresh.interval": ["refresh-interval"],
@@ -514,6 +516,7 @@ async function saveSettings() {
       proxy: {
         mode: document.getElementById("proxy-mode").value,
         list: document.getElementById("proxy-list").value,
+        backup_list: document.getElementById("proxy-backup-list").value,
       },
       credential_management: {
         abnormal_threshold: Number(document.getElementById("abnormal-threshold").value),

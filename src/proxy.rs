@@ -83,6 +83,7 @@ mod tests {
         let config = ProxyConfig {
             mode: "fixed".to_string(),
             list: "socks5://127.0.0.1:10808\nsocks5://127.0.0.1:10809".to_string(),
+            backup_list: String::new(),
         };
         assert_eq!(
             selector.select_proxy(&config).unwrap(),
@@ -100,6 +101,7 @@ mod tests {
         let config = ProxyConfig {
             mode: "round_robin".to_string(),
             list: "socks5://127.0.0.1:10808\nsocks5://127.0.0.1:10809".to_string(),
+            backup_list: String::new(),
         };
         assert_eq!(
             selector.select_proxy(&config).unwrap(),

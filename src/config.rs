@@ -115,6 +115,8 @@ pub struct ProxyConfig {
     pub mode: String,
     #[serde(default)]
     pub list: String,
+    #[serde(default)]
+    pub backup_list: String,
 }
 
 impl Default for ProxyConfig {
@@ -122,6 +124,7 @@ impl Default for ProxyConfig {
         Self {
             mode: default_proxy_mode(),
             list: String::new(),
+            backup_list: String::new(),
         }
     }
 }
@@ -552,6 +555,7 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
     validate_backup_config(&config.backup)?;
     validate_proxy_mode(config.proxy.mode.trim())?;
     crate::proxy::validate_proxy_list(&config.proxy.list)?;
+    crate::proxy::validate_proxy_list(&config.proxy.backup_list)?;
     SocketAddr::from_str(config.web.listen.trim())
         .with_context(|| format!("invalid web.listen: {}", config.web.listen))?;
     Ok(())
@@ -675,6 +679,9 @@ fn diff_editable_settings(current: &EditableSettings, incoming: &EditableSetting
     }
     if current.proxy.list != incoming.proxy.list {
         changed.push("proxy.list".to_string());
+    }
+    if current.proxy.backup_list != incoming.proxy.backup_list {
+        changed.push("proxy.backup_list".to_string());
     }
     if current.credential_management.abnormal_threshold
         != incoming.credential_management.abnormal_threshold
@@ -1081,5 +1088,13 @@ mod tests {
             .expect("config.example.yaml should parse");
 
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_config_rejects_invalid_backup_proxy_list() {
+        let mut config = AppConfig::default();
+        config.proxy.backup_list = "http://127.0.0.1:10808".to_string();
+
+        assert!(validate_config(&config).is_err());
     }
 }
