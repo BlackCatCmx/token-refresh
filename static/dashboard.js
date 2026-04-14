@@ -763,6 +763,21 @@ async function restoreCredential(name) {
   await refreshAll();
 }
 
+async function restoreSelected() {
+  const names = selectedNames("abnormal");
+  if (names.length === 0) {
+    alert("请先选择至少一个凭证");
+    return;
+  }
+  if (!confirm(`确认恢复选中的 ${names.length} 个凭证到正常区吗？`)) return;
+  await api("api/credentials/restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ names }),
+  });
+  await refreshAll();
+}
+
 async function deleteCredential(zone, name) {
   if (!confirm("确认删除这个凭证吗？")) return;
   await api("api/credentials/delete", {
@@ -864,6 +879,35 @@ function downloadCredential(zone, name) {
 
 function downloadCredentialArchive(zone) {
   window.location.href = `api/credentials/archive.zip?zone=${zone}`;
+}
+
+async function downloadSelected(zone) {
+  const names = selectedNames(zone);
+  if (names.length === 0) {
+    alert("请先选择至少一个凭证");
+    return;
+  }
+  const response = await api("api/credentials/archive-selected.zip", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ zone, names }),
+  });
+  await downloadBlobResponse(response, `credentials-${zone}-selected.zip`);
+}
+
+async function downloadBlobResponse(response, fallbackName) {
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/i);
+  const fileName = match?.[1] || fallbackName;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 const backupRestoreState = {
@@ -1280,10 +1324,12 @@ window.removeBackupRemote = removeBackupRemote;
 window.moveBackupRemote = moveBackupRemote;
 window.manualRefresh = manualRefresh;
 window.restoreCredential = restoreCredential;
+window.restoreSelected = restoreSelected;
 window.deleteCredential = deleteCredential;
 window.deleteSelected = deleteSelected;
 window.downloadCredential = downloadCredential;
 window.downloadCredentialArchive = downloadCredentialArchive;
+window.downloadSelected = downloadSelected;
 window.openCredentialEditor = openCredentialEditor;
 window.closeCredentialEditor = closeCredentialEditor;
 window.saveCredentialEditor = saveCredentialEditor;

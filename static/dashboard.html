@@ -96,6 +96,7 @@
               <input id="normal-select-all" type="checkbox" onchange="toggleAll('normal', this.checked)">
               全选
             </label>
+            <button type="button" class="secondary" onclick="downloadSelected('normal')">下载选中</button>
             <button type="button" class="danger" onclick="deleteSelected('normal')">删除选中</button>
           </div>
         </div>
@@ -110,6 +111,8 @@
               <input id="abnormal-select-all" type="checkbox" onchange="toggleAll('abnormal', this.checked)">
               全选
             </label>
+            <button type="button" onclick="restoreSelected()">恢复选中</button>
+            <button type="button" class="secondary" onclick="downloadSelected('abnormal')">下载选中</button>
             <button type="button" class="danger" onclick="deleteSelected('abnormal')">删除选中</button>
           </div>
         </div>

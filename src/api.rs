@@ -60,6 +60,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/credentials/archive.zip",
             get(download_credential_archive),
         )
+        .route(
+            "/api/credentials/archive-selected.zip",
+            post(download_selected_credential_archive),
+        )
         .route("/api/backup/status", get(get_backup_status))
         .route("/api/backup/snapshots", get(list_backup_snapshots))
         .route("/api/backup/run", post(run_backup_now))
@@ -687,6 +691,12 @@ struct ArchiveQuery {
     zone: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SelectedArchiveRequest {
+    zone: String,
+    names: Vec<String>,
+}
+
 async fn download_credential_archive(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ArchiveQuery>,
@@ -695,6 +705,24 @@ async fn download_credential_archive(
         Ok(bytes) => download_response(
             "application/zip",
             format!("credentials-{}.zip", query.zone.trim()),
+            bytes,
+        ),
+        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    }
+}
+
+async fn download_selected_credential_archive(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SelectedArchiveRequest>,
+) -> Response {
+    match archive::build_selected_credential_archive(
+        &state.store,
+        payload.zone.trim(),
+        &payload.names,
+    ) {
+        Ok(bytes) => download_response(
+            "application/zip",
+            format!("credentials-{}-selected.zip", payload.zone.trim()),
             bytes,
         ),
         Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
