@@ -83,6 +83,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_cpa_config).put(update_cpa_config),
         )
         .route("/api/cpa/status", get(get_cpa_status))
+        .route("/api/cpa/reclaim-all", post(run_cpa_reclaim_all))
         .route("/api/cpa/inspect-once", post(run_cpa_inspect_once))
         .route("/api/cpa/logs", get(get_cpa_logs))
         .route("/api/cpa/logs/download", get(download_cpa_logs))
@@ -1046,6 +1047,12 @@ async fn get_cpa_status(State(state): State<Arc<AppState>>) -> Response {
 async fn run_cpa_inspect_once(State(state): State<Arc<AppState>>) -> Response {
     let config = state.cpa_config.get();
     let result = state.cpa_manager.inspect_once(&config).await;
+    Json(result).into_response()
+}
+
+async fn run_cpa_reclaim_all(State(state): State<Arc<AppState>>) -> Response {
+    let config = state.cpa_config.get();
+    let result = state.cpa_manager.reclaim_all(&config).await;
     Json(result).into_response()
 }
 

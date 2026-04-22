@@ -125,7 +125,10 @@
       <section class="full-width">
         <div class="section-header">
           <h2>巡查操作</h2>
-          <button type="button" id="cpa-inspect-btn" onclick="runCpaInspectOnce()">立即巡查</button>
+          <div class="toolbar">
+            <button type="button" class="secondary" id="cpa-reclaim-btn" onclick="runCpaReclaimAll()">取回凭证</button>
+            <button type="button" id="cpa-inspect-btn" onclick="runCpaInspectOnce()">立即巡查</button>
+          </div>
         </div>
         <div id="cpa-status">
           <span class="status-label">加载中...</span>

@@ -43,6 +43,22 @@ pub struct InspectResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ReclaimResult {
+    pub started_at: String,
+    pub finished_at: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub total_codex: usize,
+    pub imported_to_normal: usize,
+    pub imported_to_abnormal: usize,
+    pub imported_exhausted: usize,
+    pub cleaned_disabled_residual: usize,
+    pub skipped: usize,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 pub struct CpaManager {
     store: Arc<CredentialStore>,
     status_store: Arc<CredentialStatusStore>,
@@ -192,7 +208,7 @@ impl CpaManager {
         };
         result.total_codex = entries.len();
 
-        for entry in entries.iter().filter(|entry| entry.disabled) {
+        for entry in entries.iter().filter(|entry| is_disabled_entry(entry)) {
             if let Err(err) = self.cleanup_disabled_residual(&client, entry).await {
                 let message = format!("清理 CPA 禁用残留失败 {}: {err:#}", entry.name);
                 self.log_best_effort(format!("[WARN] {message}"));
@@ -202,7 +218,7 @@ impl CpaManager {
 
         let active_entries: Vec<CpaAuthEntry> = entries
             .into_iter()
-            .filter(|entry| !entry.disabled)
+            .filter(|entry| !is_disabled_entry(entry))
             .collect();
         let unauthorized_entries: Vec<CpaAuthEntry> = active_entries
             .iter()
@@ -236,7 +252,10 @@ impl CpaManager {
                         &entry,
                         CredentialZone::Abnormal,
                         None,
-                        ImportStatusKind::AbnormalUnauthorized,
+                        ImportStatusKind::Abnormal {
+                            code: "cpa_unauthorized",
+                            default_reason: "unauthorized",
+                        },
                     )
                     .await
                 {
@@ -294,7 +313,7 @@ impl CpaManager {
                 Ok(remaining) => {
                     let remaining_active: Vec<CpaAuthEntry> = remaining
                         .into_iter()
-                        .filter(|entry| !entry.disabled)
+                        .filter(|entry| !is_disabled_entry(entry))
                         .collect();
                     result.supplement_before = remaining_active.len();
                     result.supplement_needed = cfg
@@ -350,12 +369,152 @@ impl CpaManager {
         self.finish_result(result)
     }
 
+    pub async fn reclaim_all(&self, cfg: &CpaConfig) -> ReclaimResult {
+        let started_at = Utc::now().to_rfc3339();
+        let guard = match self.running.clone().try_lock_owned() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return self.finish_reclaim_result(ReclaimResult {
+                    started_at,
+                    finished_at: String::new(),
+                    ok: false,
+                    error: Some("CPA 操作正在执行中".to_string()),
+                    ..ReclaimResult::default()
+                });
+            }
+        };
+        self.running_flag.store(true, Ordering::SeqCst);
+        let _running_guard = RunningFlagGuard {
+            flag: &self.running_flag,
+            _guard: guard,
+        };
+        self.log_best_effort("[INFO] CPA reclaim started");
+
+        let mut result = ReclaimResult {
+            started_at,
+            ..ReclaimResult::default()
+        };
+        let mut local_changed = false;
+
+        if let Err(err) = self.write_coordinator.ensure_writes_allowed() {
+            result.error = Some(err.to_string());
+            return self.finish_reclaim_result(result);
+        }
+
+        let client = match CpaClient::new(&cfg.base_url, &cfg.management_key) {
+            Ok(client) => client,
+            Err(err) => {
+                result.error = Some(err.to_string());
+                return self.finish_reclaim_result(result);
+            }
+        };
+
+        let entries = match client.list_codex_files().await {
+            Ok(entries) => entries,
+            Err(err) => {
+                result.error = Some(err.to_string());
+                return self.finish_reclaim_result(result);
+            }
+        };
+        result.total_codex = entries.len();
+
+        for entry in entries {
+            let has_local_copy = match self.local_copy_exists(&entry.name) {
+                Ok(exists) => exists,
+                Err(err) => {
+                    let message = format!("检查本地同名凭证失败 {}: {err:#}", entry.name);
+                    self.log_best_effort(format!("[ERROR] {message}"));
+                    result.errors.push(message);
+                    continue;
+                }
+            };
+            // Disabled entries with an existing local copy only need remote residual cleanup.
+            // When no local copy exists, they are reclaimed into the abnormal zone below.
+            if is_disabled_entry(&entry) && has_local_copy {
+                match self.cleanup_disabled_residual(&client, &entry).await {
+                    Ok(()) => {
+                        result.cleaned_disabled_residual += 1;
+                    }
+                    Err(err) => {
+                        let message = format!("清理 CPA 禁用残留失败 {}: {err:#}", entry.name);
+                        self.log_best_effort(format!("[WARN] {message}"));
+                        result.warnings.push(message);
+                    }
+                }
+                continue;
+            }
+
+            let status_kind = classify_reclaim_import(&entry);
+            let target_zone = status_kind.target_zone();
+            match self
+                .move_from_cpa(
+                    &client,
+                    &entry,
+                    target_zone,
+                    entry.next_retry_after.clone(),
+                    status_kind,
+                )
+                .await
+            {
+                Ok(outcome) => {
+                    local_changed |= outcome.local_changed;
+                    if outcome.moved {
+                        match status_kind {
+                            ImportStatusKind::Normal => result.imported_to_normal += 1,
+                            ImportStatusKind::NormalExhausted => result.imported_exhausted += 1,
+                            ImportStatusKind::Abnormal { .. } => {
+                                result.imported_to_abnormal += 1;
+                            }
+                        }
+                    } else {
+                        result.skipped += 1;
+                    }
+                    if let Some(message) = outcome.message {
+                        result.warnings.push(message);
+                    }
+                }
+                Err(err) => {
+                    let message = format!("取回 CPA 凭证失败 {}: {err:#}", entry.name);
+                    self.log_best_effort(format!("[ERROR] {message}"));
+                    result.errors.push(message);
+                }
+            }
+        }
+
+        if local_changed {
+            self.backup.mark_dirty("cpa_reclaim_all");
+            self.scheduler.wake();
+        }
+
+        recompute_reclaim_ok(&mut result);
+        self.log_best_effort(format!(
+            "[INFO] CPA reclaim finished ok={} total={} normal={} abnormal={} exhausted={} cleaned_disabled_residual={} skipped={} warnings={} errors={}",
+            result.ok,
+            result.total_codex,
+            result.imported_to_normal,
+            result.imported_to_abnormal,
+            result.imported_exhausted,
+            result.cleaned_disabled_residual,
+            result.skipped,
+            result.warnings.len(),
+            result.errors.len()
+        ));
+        self.finish_reclaim_result(result)
+    }
+
     fn finish_result(&self, mut result: InspectResult) -> InspectResult {
         if result.finished_at.is_empty() {
             result.finished_at = Utc::now().to_rfc3339();
         }
         if let Ok(mut guard) = self.last_result.lock() {
             *guard = Some(result.clone());
+        }
+        result
+    }
+
+    fn finish_reclaim_result(&self, mut result: ReclaimResult) -> ReclaimResult {
+        if result.finished_at.is_empty() {
+            result.finished_at = Utc::now().to_rfc3339();
         }
         result
     }
@@ -448,19 +607,25 @@ impl CpaManager {
                 }
             } else {
                 let status_result = match status_kind {
+                    ImportStatusKind::Normal => {
+                        self.status_store.restore_to_normal(&local_name).map(|_| ())
+                    }
                     ImportStatusKind::NormalExhausted => self
                         .status_store
                         .set_cpa_exhausted(&local_name, resets_at.clone())
                         .map(|_| ()),
-                    ImportStatusKind::AbnormalUnauthorized => self
+                    ImportStatusKind::Abnormal {
+                        code,
+                        default_reason,
+                    } => self
                         .status_store
                         .record_failure(
                             &local_name,
                             CredentialZone::Normal.as_str(),
                             false,
                             true,
-                            "cpa_unauthorized",
-                            entry.status_message.clone(),
+                            code,
+                            cpa_failure_reason(entry, default_reason),
                         )
                         .map(|_| ()),
                 };
@@ -666,8 +831,21 @@ impl CpaManager {
 
 #[derive(Clone, Copy)]
 enum ImportStatusKind {
+    Normal,
     NormalExhausted,
-    AbnormalUnauthorized,
+    Abnormal {
+        code: &'static str,
+        default_reason: &'static str,
+    },
+}
+
+impl ImportStatusKind {
+    fn target_zone(self) -> CredentialZone {
+        match self {
+            Self::Normal | Self::NormalExhausted => CredentialZone::Normal,
+            Self::Abnormal { .. } => CredentialZone::Abnormal,
+        }
+    }
 }
 
 struct RunningFlagGuard<'a> {
@@ -742,6 +920,63 @@ fn is_exhausted_entry(entry: &CpaAuthEntry) -> bool {
     status == "error" && status_message.contains("quota exhausted")
 }
 
+fn is_disabled_entry(entry: &CpaAuthEntry) -> bool {
+    entry.disabled || entry.status.trim().eq_ignore_ascii_case("disabled")
+}
+
+fn is_payment_required_entry(entry: &CpaAuthEntry) -> bool {
+    let status = entry.status.trim().to_ascii_lowercase();
+    let status_message = entry.status_message.trim().to_ascii_lowercase();
+    status == "error"
+        && (status_message.contains("payment_required")
+            || contains_status_code(&status_message, 402)
+            || contains_status_code(&status_message, 403))
+}
+
+fn is_not_found_entry(entry: &CpaAuthEntry) -> bool {
+    let status = entry.status.trim().to_ascii_lowercase();
+    let status_message = entry.status_message.trim().to_ascii_lowercase();
+    status == "error"
+        && (status_message.contains("not_found") || contains_status_code(&status_message, 404))
+}
+
+fn classify_reclaim_import(entry: &CpaAuthEntry) -> ImportStatusKind {
+    if is_exhausted_entry(entry) {
+        return ImportStatusKind::NormalExhausted;
+    }
+    if is_disabled_entry(entry) {
+        return ImportStatusKind::Abnormal {
+            code: "cpa_disabled",
+            default_reason: "disabled via management API",
+        };
+    }
+    if is_unauthorized_entry(entry) {
+        return ImportStatusKind::Abnormal {
+            code: "cpa_unauthorized",
+            default_reason: "unauthorized",
+        };
+    }
+    if is_payment_required_entry(entry) {
+        return ImportStatusKind::Abnormal {
+            code: "cpa_payment_required",
+            default_reason: "payment_required",
+        };
+    }
+    if is_not_found_entry(entry) {
+        return ImportStatusKind::Abnormal {
+            code: "cpa_not_found",
+            default_reason: "not_found",
+        };
+    }
+    if entry.status.trim().eq_ignore_ascii_case("error") || entry.unavailable {
+        return ImportStatusKind::Abnormal {
+            code: "cpa_error",
+            default_reason: "request failed",
+        };
+    }
+    ImportStatusKind::Normal
+}
+
 fn contains_status_code(status_message: &str, code: u16) -> bool {
     let compact: String = status_message
         .chars()
@@ -752,6 +987,19 @@ fn contains_status_code(status_message: &str, code: u16) -> bool {
 
 fn recompute_ok(result: &mut InspectResult) {
     result.ok = result.error.is_none() && result.errors.is_empty();
+}
+
+fn recompute_reclaim_ok(result: &mut ReclaimResult) {
+    result.ok = result.error.is_none() && result.errors.is_empty();
+}
+
+fn cpa_failure_reason(entry: &CpaAuthEntry, default_reason: &str) -> String {
+    let trimmed = entry.status_message.trim();
+    if trimmed.is_empty() {
+        default_reason.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn validate_credential_bytes(bytes: &[u8]) -> Result<CodexCredentialFile> {
@@ -851,6 +1099,114 @@ mod tests {
     }
 
     #[test]
+    fn classifies_disabled_reclaim_entries_as_abnormal() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "disabled".to_string(),
+            status_message: "disabled via management API".to_string(),
+            disabled: false,
+            unavailable: false,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(matches!(
+            classify_reclaim_import(&entry),
+            ImportStatusKind::Abnormal {
+                code: "cpa_disabled",
+                ..
+            }
+        ));
+        assert!(is_disabled_entry(&entry));
+    }
+
+    #[test]
+    fn classifies_payment_required_reclaim_entries_as_abnormal() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "error".to_string(),
+            status_message: "payment_required".to_string(),
+            disabled: false,
+            unavailable: true,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(matches!(
+            classify_reclaim_import(&entry),
+            ImportStatusKind::Abnormal {
+                code: "cpa_payment_required",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn classifies_not_found_reclaim_entries_as_abnormal() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "error".to_string(),
+            status_message: "not_found".to_string(),
+            disabled: false,
+            unavailable: true,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(matches!(
+            classify_reclaim_import(&entry),
+            ImportStatusKind::Abnormal {
+                code: "cpa_not_found",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn classifies_active_reclaim_entries_as_normal() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "active".to_string(),
+            status_message: String::new(),
+            disabled: false,
+            unavailable: false,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(matches!(
+            classify_reclaim_import(&entry),
+            ImportStatusKind::Normal
+        ));
+    }
+
+    #[test]
+    fn classifies_transient_error_reclaim_entries_as_abnormal() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "error".to_string(),
+            status_message: "transient upstream error".to_string(),
+            disabled: false,
+            unavailable: true,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(matches!(
+            classify_reclaim_import(&entry),
+            ImportStatusKind::Abnormal {
+                code: "cpa_error",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn inspect_result_with_warning_stays_ok() {
         let mut result = InspectResult {
             warnings: vec!["warn".to_string()],
@@ -858,6 +1214,16 @@ mod tests {
         };
         recompute_ok(&mut result);
         assert!(result.ok);
+    }
+
+    #[test]
+    fn reclaim_result_with_error_becomes_failed() {
+        let mut result = ReclaimResult {
+            errors: vec!["err".to_string()],
+            ..ReclaimResult::default()
+        };
+        recompute_reclaim_ok(&mut result);
+        assert!(!result.ok);
     }
 
     #[test]

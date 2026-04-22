@@ -1175,8 +1175,39 @@ async function loadCpaStatus() {
     </div>
   `;
   const inspectBtn = document.getElementById("cpa-inspect-btn");
+  const reclaimBtn = document.getElementById("cpa-reclaim-btn");
   inspectBtn.disabled = running;
   inspectBtn.textContent = running ? "巡查执行中" : "立即巡查";
+  reclaimBtn.disabled = running;
+  reclaimBtn.textContent = running ? "取回执行中" : "取回凭证";
+}
+
+async function runCpaReclaimAll() {
+  if (!confirm("这会从 CLIProxyAPI 服务器取回全部 codex 凭证，并按状态放入正常区或异常区。成功取回后，远端对应文件会被删除。确认继续吗？")) return;
+  const btn = document.getElementById("cpa-reclaim-btn");
+  btn.disabled = true;
+  btn.classList.add("loading");
+  try {
+    const data = await api("api/cpa/reclaim-all", { method: "POST" });
+    await refreshAll();
+    const summary = `取回完成：正常 ${data.imported_to_normal}，异常 ${data.imported_to_abnormal}，耗尽 ${data.imported_exhausted}，清理残留 ${data.cleaned_disabled_residual}，跳过 ${data.skipped}`;
+    if (data.ok && data.warnings?.length) {
+      const warningSuffix = data.warnings.length > 1 ? ` 等 ${data.warnings.length} 条` : "";
+      showToast(`${summary}；告警：${data.warnings[0]}${warningSuffix}`, "warning", 6000);
+    } else if (data.ok) {
+      showToast(summary);
+    } else {
+      showToast(data.error || data.errors?.[0] || "CPA 取回失败", "error", 4500);
+    }
+  } catch (error) {
+    showToast(error.message, "error", 4500);
+  } finally {
+    if (btn.isConnected) {
+      btn.disabled = false;
+      btn.classList.remove("loading");
+      btn.textContent = "取回凭证";
+    }
+  }
 }
 
 async function runCpaInspectOnce() {
@@ -1338,6 +1369,7 @@ window.fillMissingUserAgents = fillMissingUserAgents;
 window.reassignCliVersions = reassignCliVersions;
 window.reassignAllUserAgents = reassignAllUserAgents;
 window.saveCpaConfig = saveCpaConfig;
+window.runCpaReclaimAll = runCpaReclaimAll;
 window.runCpaInspectOnce = runCpaInspectOnce;
 window.reloadCpaLog = reloadCpaLog;
 window.downloadCpaLog = downloadCpaLog;
