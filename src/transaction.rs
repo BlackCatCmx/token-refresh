@@ -361,7 +361,7 @@ impl RefreshTransaction {
             };
             match attempt_result {
                 Ok(payload) => return Ok(Ok(payload)),
-                Err(error) if should_fallback_due_to_proxy_connect(&error) => {
+                Err(error) if should_fallback_to_next_proxy(&error) => {
                     let Some(next_attempt) = attempt_sequence.get(index + 1) else {
                         return Ok(Err(error));
                     };
@@ -540,8 +540,12 @@ impl RefreshTransaction {
     }
 }
 
-fn should_fallback_due_to_proxy_connect(error: &RefreshFailure) -> bool {
-    error.code == "network_connect_failed" && error.proxy_host.is_some()
+fn should_fallback_to_next_proxy(error: &RefreshFailure) -> bool {
+    error.proxy_host.is_some()
+        && matches!(
+            error.code.as_str(),
+            "network_connect_failed" | "network_timeout"
+        )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -589,36 +593,37 @@ fn log_proxy_fallback_transition(
     next: &ProxyAttempt,
     proxy_host: Option<&str>,
 ) -> Result<()> {
-    let proxy_host = proxy_host.unwrap_or("-");
+    let failed_proxy = proxy_host.unwrap_or("-");
+    let next_proxy = proxy_attempt_route_label(next);
     let message = match (current, next) {
         (ProxyAttempt::Primary(_), ProxyAttempt::Primary(_)) => {
             format!(
-                "主代理连接失败，切换下一条主代理 (key={}, proxy={})",
-                key, proxy_host
+                "主代理请求失败，准备切换下一条主代理 (key={}, failed_proxy={}, next_proxy={})",
+                key, failed_proxy, next_proxy
             )
         }
         (ProxyAttempt::Primary(_), ProxyAttempt::Backup(_)) => {
             format!(
-                "主代理连接失败，切换备用代理 (key={}, proxy={})",
-                key, proxy_host
+                "主代理请求失败，准备切换到备用代理 (key={}, failed_proxy={}, next_proxy={})",
+                key, failed_proxy, next_proxy
             )
         }
         (ProxyAttempt::Primary(_), ProxyAttempt::Direct) => {
             format!(
-                "主代理连接失败，回退到直连 (key={}, proxy={})",
-                key, proxy_host
+                "主代理请求失败，准备回退到直连 (key={}, failed_proxy={}, next=direct)",
+                key, failed_proxy
             )
         }
         (ProxyAttempt::Backup(_), ProxyAttempt::Backup(_)) => {
             format!(
-                "备用代理连接失败，切换下一条备用代理 (key={}, proxy={})",
-                key, proxy_host
+                "备用代理请求失败，准备切换下一条备用代理 (key={}, failed_proxy={}, next_proxy={})",
+                key, failed_proxy, next_proxy
             )
         }
         (ProxyAttempt::Backup(_), ProxyAttempt::Direct) => {
             format!(
-                "备用代理连接失败，回退到直连 (key={}, proxy={})",
-                key, proxy_host
+                "备用代理请求失败，准备回退到直连 (key={}, failed_proxy={}, next=direct)",
+                key, failed_proxy
             )
         }
         (ProxyAttempt::Direct, _) | (ProxyAttempt::Backup(_), ProxyAttempt::Primary(_)) => {
@@ -631,6 +636,16 @@ fn log_proxy_fallback_transition(
     };
     runtime_warn_best_effort(logger, message);
     Ok(())
+}
+
+fn proxy_attempt_route_label(attempt: &ProxyAttempt) -> String {
+    match attempt {
+        ProxyAttempt::Primary(proxy) | ProxyAttempt::Backup(proxy) => reqwest::Url::parse(proxy)
+            .ok()
+            .and_then(|url| Some(format!("{}:{}", url.host_str()?, url.port()?)))
+            .unwrap_or_else(|| proxy.clone()),
+        ProxyAttempt::Direct => "direct".to_string(),
+    }
 }
 
 fn runtime_warn_best_effort(logger: &LogManager, message: impl AsRef<str>) {
@@ -920,6 +935,21 @@ mod tests {
         assert!(error.to_string().contains("unsupported proxy mode"));
     }
 
+    #[test]
+    fn should_fallback_to_next_proxy_when_proxy_times_out() {
+        let error = RefreshFailure::transient("network_timeout", "timeout")
+            .with_proxy_host(Some("127.0.0.1:10808".to_string()));
+
+        assert!(should_fallback_to_next_proxy(&error));
+    }
+
+    #[test]
+    fn should_not_fallback_to_next_proxy_when_direct_times_out() {
+        let error = RefreshFailure::transient("network_timeout", "timeout").with_proxy_host(None);
+
+        assert!(!should_fallback_to_next_proxy(&error));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn refresh_with_proxy_fallback_rejects_unknown_mode() {
         let temp = tempfile::tempdir().unwrap();
@@ -957,5 +987,25 @@ mod tests {
                 .to_string()
                 .contains("unexpected proxy fallback transition")
         );
+    }
+
+    #[test]
+    fn log_proxy_fallback_transition_logs_failed_and_next_proxy() {
+        let temp = tempfile::tempdir().unwrap();
+        let logger = LogManager::new(temp.path(), 4096, "info").unwrap();
+
+        log_proxy_fallback_transition(
+            &logger,
+            "demo.json",
+            &ProxyAttempt::Primary("socks5://127.0.0.1:10808".to_string()),
+            &ProxyAttempt::Backup("socks5://127.0.0.1:10818".to_string()),
+            Some("127.0.0.1:10808"),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(temp.path().join("logs/runtime.log")).unwrap();
+        assert!(content.contains("主代理请求失败，准备切换到备用代理"));
+        assert!(content.contains("failed_proxy=127.0.0.1:10808"));
+        assert!(content.contains("next_proxy=127.0.0.1:10818"));
     }
 }
