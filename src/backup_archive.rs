@@ -6,14 +6,17 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zip::CompressionMethod;
-use zip::write::FileOptions;
+use zip::result::ZipError;
+use zip::write::SimpleFileOptions;
+use zip::{AesMode, CompressionMethod};
 
 use crate::credential_store::{CredentialStore, CredentialZone};
 use crate::status::{CredentialStatusRecord, CredentialStatusStore};
 
 const MANIFEST_PATH: &str = "manifest.json";
 const STATUS_PATH: &str = "state/credential_status.json";
+const AES_AUTH_CODE_ERROR_TEXT: &str =
+    "Invalid authentication code, this could be due to an invalid password or errors in the data";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SnapshotManifest {
@@ -47,15 +50,32 @@ pub struct RestoredSnapshot {
     pub abnormal_count: usize,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("备份密码错误")]
+struct InvalidBackupPasswordError;
+
+pub fn is_invalid_backup_password(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<InvalidBackupPasswordError>())
+}
+
 pub fn build_snapshot_archive(
     store: &CredentialStore,
     status_store: &CredentialStatusStore,
     trigger: &str,
     created_at: DateTime<Utc>,
+    password: &str,
 ) -> Result<Vec<u8>> {
     let cursor = Cursor::new(Vec::new());
-    let cursor =
-        build_snapshot_archive_to_writer(cursor, store, status_store, trigger, created_at)?;
+    let cursor = build_snapshot_archive_to_writer(
+        cursor,
+        store,
+        status_store,
+        trigger,
+        created_at,
+        password,
+    )?;
     Ok(cursor.into_inner())
 }
 
@@ -65,12 +85,30 @@ pub fn build_snapshot_archive_to_writer<W: Write + Seek>(
     status_store: &CredentialStatusStore,
     trigger: &str,
     created_at: DateTime<Utc>,
+    password: &str,
+) -> Result<W> {
+    build_snapshot_archive_to_writer_inner(
+        writer,
+        store,
+        status_store,
+        trigger,
+        created_at,
+        Some(password),
+    )
+}
+
+fn build_snapshot_archive_to_writer_inner<W: Write + Seek>(
+    writer: W,
+    store: &CredentialStore,
+    status_store: &CredentialStatusStore,
+    trigger: &str,
+    created_at: DateTime<Utc>,
+    password: Option<&str>,
 ) -> Result<W> {
     let normal_entries = store.scan_zone(CredentialZone::Normal)?;
     let abnormal_entries = store.scan_zone(CredentialZone::Abnormal)?;
     let mut manifest_entries = Vec::new();
     let mut writer = zip::ZipWriter::new(writer);
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
 
     for entry in &normal_entries {
         let archive_path = format!("normal/{}", entry.key);
@@ -79,7 +117,7 @@ pub fn build_snapshot_archive_to_writer<W: Write + Seek>(
             &mut writer,
             &archive_path,
             &bytes,
-            options,
+            password,
             &mut manifest_entries,
         )?;
     }
@@ -90,7 +128,7 @@ pub fn build_snapshot_archive_to_writer<W: Write + Seek>(
             &mut writer,
             &archive_path,
             &bytes,
-            options,
+            password,
             &mut manifest_entries,
         )?;
     }
@@ -103,7 +141,7 @@ pub fn build_snapshot_archive_to_writer<W: Write + Seek>(
         &mut writer,
         STATUS_PATH,
         &status_bytes,
-        options,
+        password,
         &mut manifest_entries,
     )?;
 
@@ -116,32 +154,45 @@ pub fn build_snapshot_archive_to_writer<W: Write + Seek>(
         status_present: true,
         entries: manifest_entries,
     };
-    writer.start_file(MANIFEST_PATH, options)?;
-    writer.write_all(
-        &serde_json::to_vec_pretty(&manifest).context("failed to serialize manifest.json")?,
-    )?;
+    let mut manifest_bytes =
+        serde_json::to_vec_pretty(&manifest).context("failed to serialize manifest.json")?;
+    manifest_bytes.push(b'\n');
+    write_raw_snapshot_entry(&mut writer, MANIFEST_PATH, &manifest_bytes, password)?;
     writer
         .finish()
         .context("failed to finalize snapshot archive")
 }
 
-pub fn parse_snapshot_archive(bytes: &[u8]) -> Result<ParsedSnapshot> {
+pub fn parse_snapshot_archive(bytes: &[u8], password: &str) -> Result<ParsedSnapshot> {
     let cursor = Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor).context("invalid backup snapshot ZIP")?;
     let mut files = BTreeMap::new();
     let mut manifest: Option<SnapshotManifest> = None;
 
     for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
-            .context("failed to read ZIP entry")?;
+        let encrypted = archive
+            .get_aes_verification_key_and_salt(index)
+            .map_err(map_zip_read_error)
+            .context("failed to inspect ZIP entry encryption")?
+            .is_some();
+        let mut file = if encrypted {
+            archive
+                .by_index_decrypt(index, password.as_bytes())
+                .map_err(map_zip_read_error)
+                .context("failed to decrypt ZIP entry")?
+        } else {
+            archive
+                .by_index(index)
+                .map_err(map_zip_read_error)
+                .context("failed to read ZIP entry")?
+        };
         if file.is_dir() {
             continue;
         }
         let name = file.name().replace('\\', "/");
         let mut content = Vec::new();
         file.read_to_end(&mut content)
-            .with_context(|| format!("failed to read ZIP entry {name}"))?;
+            .map_err(|error| map_zip_entry_content_error(&name, encrypted, error))?;
         if name == MANIFEST_PATH {
             manifest = Some(
                 serde_json::from_slice(&content).context("invalid manifest.json in snapshot")?,
@@ -262,17 +313,62 @@ fn write_snapshot_entry<W: Write + Seek>(
     writer: &mut zip::ZipWriter<W>,
     path: &str,
     bytes: &[u8],
-    options: FileOptions,
+    password: Option<&str>,
     manifest_entries: &mut Vec<SnapshotManifestEntry>,
 ) -> Result<()> {
-    writer.start_file(path, options)?;
-    writer.write_all(bytes)?;
+    write_raw_snapshot_entry(writer, path, bytes, password)?;
     manifest_entries.push(SnapshotManifestEntry {
         path: path.to_string(),
         sha256: sha256_hex(bytes),
         size: bytes.len(),
     });
     Ok(())
+}
+
+fn write_raw_snapshot_entry<W: Write + Seek>(
+    writer: &mut zip::ZipWriter<W>,
+    path: &str,
+    bytes: &[u8],
+    password: Option<&str>,
+) -> Result<()> {
+    match password {
+        Some(password) => writer.start_file(
+            path,
+            SimpleFileOptions::default()
+                .compression_method(CompressionMethod::Deflated)
+                .with_aes_encryption(AesMode::Aes256, password),
+        )?,
+        None => writer.start_file(
+            path,
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        )?,
+    }
+    writer.write_all(bytes)?;
+    Ok(())
+}
+
+fn map_zip_read_error(error: ZipError) -> anyhow::Error {
+    match error {
+        ZipError::InvalidPassword => InvalidBackupPasswordError.into(),
+        other => other.into(),
+    }
+}
+
+fn map_zip_entry_content_error(
+    name: &str,
+    encrypted: bool,
+    error: std::io::Error,
+) -> anyhow::Error {
+    if encrypted && is_aes_auth_code_error(&error) {
+        return anyhow::Error::new(InvalidBackupPasswordError)
+            .context(format!("failed to read ZIP entry {name}"));
+    }
+    anyhow::Error::new(error).context(format!("failed to read ZIP entry {name}"))
+}
+
+fn is_aes_auth_code_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::InvalidData
+        && error.to_string().contains(AES_AUTH_CODE_ERROR_TEXT)
 }
 
 fn validate_snapshot_path(path: &str) -> Result<()> {
@@ -336,6 +432,8 @@ mod tests {
     use crate::config::AppConfig;
     use crate::credential::CodexCredentialFile;
 
+    const TEST_PASSWORD: &str = "backup-password";
+
     #[test]
     fn snapshot_round_trip_restores_files_and_status() {
         let temp = tempfile::tempdir().unwrap();
@@ -357,12 +455,14 @@ mod tests {
             .unwrap();
         status_store.record_success("user.json", "normal").unwrap();
 
-        let bytes = build_snapshot_archive(&store, &status_store, "manual", Utc::now()).unwrap();
+        let bytes =
+            build_snapshot_archive(&store, &status_store, "manual", Utc::now(), TEST_PASSWORD)
+                .unwrap();
 
         store.delete(CredentialZone::Normal, "user.json").unwrap();
         status_store.remove("user.json").unwrap();
 
-        let parsed = parse_snapshot_archive(&bytes).unwrap();
+        let parsed = parse_snapshot_archive(&bytes, TEST_PASSWORD).unwrap();
         restore_snapshot_archive(&store, &status_store, parsed).unwrap();
 
         assert!(
@@ -401,13 +501,85 @@ mod tests {
             &status_store,
             "manual",
             Utc::now(),
+            TEST_PASSWORD,
         )
         .unwrap();
 
         let bytes = std::fs::read(archive_file.path()).unwrap();
-        let parsed = parse_snapshot_archive(&bytes).unwrap();
+        let parsed = parse_snapshot_archive(&bytes, TEST_PASSWORD).unwrap();
         assert_eq!(parsed.manifest.normal_count, 1);
         assert_eq!(parsed.manifest.trigger, "manual");
         assert!(parsed.normal_files.contains_key("user.json"));
+    }
+
+    #[test]
+    fn snapshot_restore_rejects_wrong_password() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        config.state_dir = temp.path().join("state");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let status_store =
+            CredentialStatusStore::load(config.state_dir.join("credential_status.json")).unwrap();
+        let credential = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "user.json", &credential)
+            .unwrap();
+        status_store.record_success("user.json", "normal").unwrap();
+
+        let bytes =
+            build_snapshot_archive(&store, &status_store, "manual", Utc::now(), TEST_PASSWORD)
+                .unwrap();
+        let error = parse_snapshot_archive(&bytes, "wrong-password").unwrap_err();
+        assert!(is_invalid_backup_password(&error));
+    }
+
+    #[test]
+    fn legacy_unencrypted_snapshot_still_restores_when_password_is_provided() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        config.state_dir = temp.path().join("state");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let status_store =
+            CredentialStatusStore::load(config.state_dir.join("credential_status.json")).unwrap();
+        let credential = CodexCredentialFile {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            provider_type: "codex".to_string(),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "user.json", &credential)
+            .unwrap();
+        status_store.record_success("user.json", "normal").unwrap();
+
+        let cursor = Cursor::new(Vec::new());
+        let cursor = build_snapshot_archive_to_writer_inner(
+            cursor,
+            &store,
+            &status_store,
+            "manual",
+            Utc::now(),
+            None,
+        )
+        .unwrap();
+        let parsed = parse_snapshot_archive(&cursor.into_inner(), TEST_PASSWORD).unwrap();
+        assert_eq!(parsed.manifest.normal_count, 1);
+        assert!(parsed.normal_files.contains_key("user.json"));
+    }
+
+    #[test]
+    fn aes_auth_code_error_maps_to_invalid_backup_password() {
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidData, AES_AUTH_CODE_ERROR_TEXT);
+        let mapped = map_zip_entry_content_error("manifest.json", true, error);
+        assert!(is_invalid_backup_password(&mapped));
     }
 }

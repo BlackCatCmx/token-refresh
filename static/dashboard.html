@@ -301,6 +301,11 @@
       </div>
       <div id="backup-restore-warnings" class="backup-restore-warnings hidden"></div>
       <div id="backup-restore-list" class="backup-snapshot-list"></div>
+      <div id="backup-restore-password-group" class="backup-password-group hidden">
+        <label class="backup-password-label" for="backup-restore-password">备份密码</label>
+        <input id="backup-restore-password" type="password" class="backup-confirm-input" autocomplete="current-password" oninput="syncBackupRestoreConfirm()">
+        <div id="backup-restore-password-hint" class="muted backup-password-hint">留空时使用当前 WEB_PASSWORD</div>
+      </div>
       <label class="backup-warning-label" for="backup-restore-confirmation">请输入 <strong>确定还原</strong> 才能继续</label>
       <input id="backup-restore-confirmation" type="text" class="backup-confirm-input" oninput="syncBackupRestoreConfirm()">
       <div class="modal-footer">

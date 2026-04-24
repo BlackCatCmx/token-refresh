@@ -3,14 +3,14 @@ use std::io::Write;
 
 use anyhow::{Result, bail};
 use zip::CompressionMethod;
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 
 use crate::credential_store::{CredentialStore, CredentialZone, normalize_key};
 
 pub fn build_credential_archive(store: &CredentialStore, zone: &str) -> Result<Vec<u8>> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(cursor);
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     if zone == "all" {
         add_zone(
             &mut writer,
@@ -47,7 +47,7 @@ pub fn build_selected_credential_archive(
 
     let cursor = std::io::Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(cursor);
-    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     add_selected_entries(&mut writer, store, zone, &selected, options)?;
     let cursor = writer.finish()?;
     Ok(cursor.into_inner())
@@ -58,7 +58,7 @@ fn add_zone(
     store: &CredentialStore,
     zone: CredentialZone,
     prefix: &str,
-    options: FileOptions,
+    options: SimpleFileOptions,
 ) -> Result<()> {
     for entry in store.scan_zone(zone)? {
         let bytes = store.read_bytes(zone, &entry.key)?;
@@ -73,7 +73,7 @@ fn add_selected_entries(
     store: &CredentialStore,
     zone: CredentialZone,
     names: &[String],
-    options: FileOptions,
+    options: SimpleFileOptions,
 ) -> Result<()> {
     for name in names {
         let bytes = store.read_bytes(zone, name)?;

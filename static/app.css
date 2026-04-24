@@ -592,6 +592,23 @@ select:disabled, input:disabled, textarea:disabled {
   font-size: 13px;
 }
 
+.backup-password-group {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+
+.backup-password-label {
+  color: #111827;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.backup-password-hint {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .backup-confirm-input {
   width: 100%;
   margin-top: 8px;

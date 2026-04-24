@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive;
 use crate::backup::RestoreResult;
+use crate::backup_archive;
 use crate::config::{EditableSettings, parse_byte_size_str};
 use crate::cpa_config::CpaConfig;
 use crate::credential::CodexCredentialFile;
@@ -818,6 +819,8 @@ struct RestoreBackupRequest {
     remote_name: String,
     snapshot_key: String,
     confirmation: String,
+    #[serde(default)]
+    password: Option<String>,
 }
 
 async fn restore_from_backup(
@@ -827,9 +830,20 @@ async fn restore_from_backup(
     if payload.confirmation.trim() != "确定还原" {
         return json_error(StatusCode::BAD_REQUEST, "请输入“确定还原”后再继续");
     }
+    let password = payload
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or(state.config_manager.web_password().await);
     match state
         .backup
-        .restore_snapshot(payload.remote_name.trim(), payload.snapshot_key.trim())
+        .restore_snapshot(
+            payload.remote_name.trim(),
+            payload.snapshot_key.trim(),
+            &password,
+        )
         .await
     {
         Ok(RestoreResult {
@@ -845,6 +859,11 @@ async fn restore_from_backup(
             }))
             .into_response()
         }
+        Err(err) if backup_archive::is_invalid_backup_password(&err) => json_error_with_code(
+            StatusCode::BAD_REQUEST,
+            "备份密码错误",
+            "backup_password_invalid",
+        ),
         Err(err) => json_error(backup_error_status(&err), &err.to_string()),
     }
 }
@@ -924,8 +943,8 @@ async fn download_logs(
 fn build_log_archive(state: &AppState) -> Result<Vec<u8>> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(cursor);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
     for (name, kind) in [
         ("runtime.log", LogKind::Runtime),
         ("audit.log", LogKind::Audit),
@@ -1188,11 +1207,31 @@ struct SimpleMessage {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ErrorMessage {
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
+}
+
 fn json_error(status: StatusCode, message: &str) -> Response {
+    json_error_with_optional_code(status, message, None)
+}
+
+fn json_error_with_code(status: StatusCode, message: &str, code: &'static str) -> Response {
+    json_error_with_optional_code(status, message, Some(code))
+}
+
+fn json_error_with_optional_code(
+    status: StatusCode,
+    message: &str,
+    code: Option<&'static str>,
+) -> Response {
     (
         status,
-        Json(SimpleMessage {
+        Json(ErrorMessage {
             message: message.to_string(),
+            code,
         }),
     )
         .into_response()

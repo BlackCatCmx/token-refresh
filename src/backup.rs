@@ -410,9 +410,12 @@ impl BackupCoordinator {
         &self,
         remote_name: &str,
         snapshot_key: &str,
+        password: &str,
     ) -> Result<RestoreResult> {
         self.begin_backup_operation(true).await?;
-        let result = self.restore_snapshot_inner(remote_name, snapshot_key).await;
+        let result = self
+            .restore_snapshot_inner(remote_name, snapshot_key, password)
+            .await;
         self.finish_backup_operation(true, &result).await;
         result
     }
@@ -599,6 +602,7 @@ impl BackupCoordinator {
 
         let result = async {
             let config = self.inner.config_manager.effective_config().await;
+            let password = self.inner.config_manager.web_password().await;
             self.sync_cached_s3_clients(&config.backup).await;
             let backup = ensure_backup_ready(&config.backup)?;
             let created_at = Utc::now();
@@ -620,6 +624,7 @@ impl BackupCoordinator {
                     &self.inner.status_store,
                     trigger.as_str(),
                     created_at,
+                    &password,
                 )?;
             }
             archive_file
@@ -958,6 +963,7 @@ impl BackupCoordinator {
         &self,
         remote_name: &str,
         snapshot_key: &str,
+        password: &str,
     ) -> Result<RestoreResult> {
         let started_at = Instant::now();
         let rss_before_kb = memdiag::sample().rss_kb;
@@ -987,7 +993,8 @@ impl BackupCoordinator {
             let result = async {
                 let archive_bytes = client.get_object(snapshot_key).await?;
                 downloaded_bytes = Some(archive_bytes.len());
-                let parsed_snapshot = backup_archive::parse_snapshot_archive(&archive_bytes)?;
+                let parsed_snapshot =
+                    backup_archive::parse_snapshot_archive(&archive_bytes, password)?;
                 manifest_normal_count = Some(parsed_snapshot.manifest.normal_count);
                 manifest_abnormal_count = Some(parsed_snapshot.manifest.abnormal_count);
                 let restored: RestoredSnapshot = {

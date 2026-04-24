@@ -28,7 +28,9 @@ async function api(url, options = {}) {
   }
   if (!response.ok) {
     const data = await response.json().catch(() => ({ message: "请求失败" }));
-    throw new Error(data.message || "请求失败");
+    const error = new Error(data.message || "请求失败");
+    error.code = data.code || "";
+    throw error;
   }
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
@@ -913,6 +915,7 @@ async function downloadBlobResponse(response, fallbackName) {
 const backupRestoreState = {
   snapshots: [],
   selectedIndex: null,
+  needsPassword: false,
 };
 
 async function runBackupNow() {
@@ -955,7 +958,9 @@ async function openBackupRestoreModal() {
         </div>
       `).join("");
     }
+    setBackupRestorePasswordRequired(false);
     document.getElementById("backup-restore-confirmation").value = "";
+    document.getElementById("backup-restore-password").value = "";
     syncBackupRestoreConfirm();
     const modal = document.getElementById("backup-restore-modal");
     modal.classList.remove("hidden");
@@ -969,7 +974,10 @@ async function openBackupRestoreModal() {
 function closeBackupRestoreModal() {
   backupRestoreState.snapshots = [];
   backupRestoreState.selectedIndex = null;
+  backupRestoreState.needsPassword = false;
   document.getElementById("backup-restore-confirmation").value = "";
+  document.getElementById("backup-restore-password").value = "";
+  setBackupRestorePasswordRequired(false);
   const warnings = document.getElementById("backup-restore-warnings");
   warnings.classList.add("hidden");
   warnings.innerHTML = "";
@@ -981,12 +989,28 @@ function closeBackupRestoreModal() {
 
 function selectBackupSnapshot(index) {
   backupRestoreState.selectedIndex = Number(index);
+  document.getElementById("backup-restore-password").value = "";
+  setBackupRestorePasswordRequired(false);
   syncBackupRestoreConfirm();
 }
 
+function setBackupRestorePasswordRequired(required) {
+  backupRestoreState.needsPassword = required;
+  const group = document.getElementById("backup-restore-password-group");
+  const hint = document.getElementById("backup-restore-password-hint");
+  group.classList.toggle("hidden", !required);
+  hint.textContent = required
+    ? "当前 WEB_PASSWORD 无法解密该备份，请输入历史备份密码后重试"
+    : "留空时使用当前 WEB_PASSWORD";
+  hint.classList.toggle("danger-text", required);
+  hint.classList.toggle("muted", !required);
+}
+
 function syncBackupRestoreConfirm() {
+  const password = document.getElementById("backup-restore-password").value.trim();
   const enabled = Number.isInteger(backupRestoreState.selectedIndex)
-    && document.getElementById("backup-restore-confirmation").value.trim() === "确定还原";
+    && document.getElementById("backup-restore-confirmation").value.trim() === "确定还原"
+    && (!backupRestoreState.needsPassword || password.length > 0);
   document.getElementById("backup-restore-submit").disabled = !enabled;
 }
 
@@ -1001,18 +1025,30 @@ async function submitBackupRestore() {
     alert("请输入“确定还原”后再继续");
     return;
   }
-  await api("api/backup/restore", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      remote_name: selected.remote_name,
-      snapshot_key: selected.key,
-      confirmation,
-    }),
-  });
-  closeBackupRestoreModal();
-  await refreshAll();
-  showToast("备份还原完成");
+  const password = document.getElementById("backup-restore-password").value.trim();
+  try {
+    await api("api/backup/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        remote_name: selected.remote_name,
+        snapshot_key: selected.key,
+        confirmation,
+        password: password || undefined,
+      }),
+    });
+    closeBackupRestoreModal();
+    await refreshAll();
+    showToast("备份还原完成");
+  } catch (error) {
+    if (error.code === "backup_password_invalid") {
+      setBackupRestorePasswordRequired(true);
+      syncBackupRestoreConfirm();
+      document.getElementById("backup-restore-password").focus();
+      return;
+    }
+    alert(error.message);
+  }
 }
 
 async function importFiles() {
