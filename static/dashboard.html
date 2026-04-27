@@ -80,7 +80,7 @@
           <button type="button" onclick="document.getElementById('upload-files').click()">上传凭证</button>
           <button type="button" class="secondary" onclick="downloadCredentialArchive('normal')">下载正常区 ZIP</button>
           <button type="button" class="secondary" onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
-          <button type="button" id="backup-run-btn" onclick="runBackupNow()">立即备份</button>
+          <button type="button" id="backup-run-btn" onclick="openBackupRunModal()">立即备份</button>
           <button type="button" class="warn" id="backup-restore-open-btn" onclick="openBackupRestoreModal()">从备份还原</button>
           <button type="button" class="secondary" onclick="fillMissingUserAgents()">补充缺失 UA</button>
           <button type="button" class="secondary" onclick="reassignCliVersions()">重配UA-cx版本</button>
@@ -286,6 +286,23 @@
       <div class="modal-footer">
         <button type="button" class="secondary" onclick="closeCredentialEditor()">取消</button>
         <button type="button" onclick="saveCredentialEditor()">保存</button>
+      </div>
+    </div>
+  </div>
+  <div id="backup-run-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" onclick="closeBackupRunModal()"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="backup-run-title">
+      <div class="modal-header">
+        <div>
+          <h2 id="backup-run-title">选择备份端</h2>
+          <div class="muted">手动备份只会写入本次选择的备份端，不再按顺序自动切换。</div>
+        </div>
+        <button type="button" class="secondary modal-close" aria-label="关闭" onclick="closeBackupRunModal()">X</button>
+      </div>
+      <div id="backup-run-list" class="backup-snapshot-list"></div>
+      <div class="modal-footer">
+        <button type="button" class="secondary" onclick="closeBackupRunModal()">取消</button>
+        <button type="button" id="backup-run-submit" onclick="submitBackupRun()" disabled>开始备份</button>
       </div>
     </div>
   </div>

@@ -28,6 +28,7 @@ pub struct BackupStatus {
     pub enabled: bool,
     pub configured: bool,
     pub configured_remote_count: usize,
+    pub configured_remote_names: Vec<String>,
     pub after_refresh_enabled: bool,
     pub running: bool,
     pub restore_running: bool,
@@ -308,12 +309,25 @@ impl BackupCoordinator {
     }
 
     pub async fn status(&self) -> BackupStatus {
-        self.inner.status.read().await.clone()
+        let config = self.inner.config_manager.effective_config().await;
+        let configured_remotes = configured_backup_remotes(&config.backup);
+        let mut status = self.inner.status.read().await.clone();
+        status.enabled = config.backup.enabled;
+        status.configured = !configured_remotes.is_empty();
+        status.configured_remote_count = configured_remotes.len();
+        status.configured_remote_names = configured_remotes
+            .into_iter()
+            .map(|(remote_name, _)| remote_name)
+            .collect();
+        status.after_refresh_enabled = config.backup.schedule.after_refresh_enabled;
+        status
     }
 
-    pub async fn run_manual_backup(&self) -> Result<RemoteSnapshot> {
+    pub async fn run_manual_backup(&self, remote_name: Option<&str>) -> Result<RemoteSnapshot> {
         self.begin_backup_operation(false).await?;
-        let result = self.run_backup_once(BackupTrigger::Manual).await;
+        let result = self
+            .run_backup_once(BackupTrigger::Manual, remote_name)
+            .await;
         self.finish_backup_operation(false, &result).await;
         result
     }
@@ -328,8 +342,7 @@ impl BackupCoordinator {
         let mut items = Vec::new();
         let mut warnings = Vec::new();
         let mut success_count = 0_usize;
-        for (index, remote) in backup.configured_remotes().into_iter().enumerate() {
-            let remote_name = remote.display_name(index);
+        for (remote_name, remote) in configured_backup_remotes(backup) {
             let (client, cache_status) = match self.cached_s3_client(remote).await {
                 Ok(value) => value,
                 Err(err) => {
@@ -441,7 +454,7 @@ impl BackupCoordinator {
     async fn background_tick(&self) -> Result<()> {
         let config = self.inner.config_manager.effective_config().await;
         self.sync_cached_s3_clients(&config.backup).await;
-        let configured_remote_count = config.backup.configured_remotes().len();
+        let configured_remote_count = configured_backup_remotes(&config.backup).len();
         let configured = configured_remote_count > 0;
         let now = Utc::now();
         let dirty_since = *self.inner.dirty_since.read().await;
@@ -475,10 +488,6 @@ impl BackupCoordinator {
         };
         {
             let mut status = self.inner.status.write().await;
-            status.enabled = config.backup.enabled;
-            status.configured = configured;
-            status.configured_remote_count = configured_remote_count;
-            status.after_refresh_enabled = config.backup.schedule.after_refresh_enabled;
             status.next_daily_at = next_daily_at.map(|value| value.to_rfc3339());
             status.next_after_refresh_at = next_after_refresh_at.map(|value| value.to_rfc3339());
         }
@@ -497,7 +506,7 @@ impl BackupCoordinator {
             now,
         ) {
             if self.try_begin_backup_operation(false).await? {
-                let result = self.run_backup_once(BackupTrigger::Daily).await;
+                let result = self.run_backup_once(BackupTrigger::Daily, None).await;
                 self.finish_backup_operation(false, &result).await;
                 result?;
                 return Ok(());
@@ -506,7 +515,9 @@ impl BackupCoordinator {
 
         if self.should_run_after_refresh(&config.backup, now).await? {
             if self.try_begin_backup_operation(false).await? {
-                let result = self.run_backup_once(BackupTrigger::AfterRefresh).await;
+                let result = self
+                    .run_backup_once(BackupTrigger::AfterRefresh, None)
+                    .await;
                 self.finish_backup_operation(false, &result).await;
                 result?;
                 return Ok(());
@@ -556,7 +567,11 @@ impl BackupCoordinator {
         }
     }
 
-    async fn run_backup_once(&self, trigger: BackupTrigger) -> Result<RemoteSnapshot> {
+    async fn run_backup_once(
+        &self,
+        trigger: BackupTrigger,
+        manual_remote_name: Option<&str>,
+    ) -> Result<RemoteSnapshot> {
         let started_at = Instant::now();
         let mem_before = memdiag::sample_full();
         let dirty_since = *self.inner.dirty_since.read().await;
@@ -605,6 +620,7 @@ impl BackupCoordinator {
             let password = self.inner.config_manager.web_password().await;
             self.sync_cached_s3_clients(&config.backup).await;
             let backup = ensure_backup_ready(&config.backup)?;
+            let backup_targets = select_backup_remotes(backup, manual_remote_name)?;
             let created_at = Utc::now();
             let temp_dir = config.state_dir.join("tmp");
             std::fs::create_dir_all(&temp_dir)
@@ -640,8 +656,7 @@ impl BackupCoordinator {
             mem_after_archive = memdiag::sample_full();
             build_elapsed_ms = Some(started_at.elapsed().as_millis());
 
-            for (index, remote) in backup.configured_remotes().into_iter().enumerate() {
-                let remote_name = remote.display_name(index);
+            for (remote_name, remote) in backup_targets {
                 {
                     let mut status = self.inner.status.write().await;
                     status.active_remote_name = Some(remote_name.clone());
@@ -1177,10 +1192,9 @@ impl BackupCoordinator {
     }
 
     async fn sync_cached_s3_clients(&self, backup: &BackupConfig) {
-        let active_names: std::collections::BTreeSet<String> = backup
-            .configured_remotes()
+        let active_names: std::collections::BTreeSet<String> = configured_backup_remotes(backup)
             .into_iter()
-            .map(remote_cache_name)
+            .map(|(_, remote)| remote_cache_name(remote))
             .collect();
         let mut guard = self.inner.s3_clients.write().await;
         let removed: Vec<String> = guard
@@ -1208,10 +1222,35 @@ fn ensure_backup_ready(backup: &BackupConfig) -> Result<&BackupConfig> {
     if !backup.enabled {
         bail!("备份功能未启用");
     }
-    if backup.configured_remotes().is_empty() {
+    if configured_backup_remotes(backup).is_empty() {
         bail!("备份远端配置不完整，请先在设置页补全至少一个备份端");
     }
     Ok(backup)
+}
+
+fn configured_backup_remotes(backup: &BackupConfig) -> Vec<(String, &BackupRemoteConfig)> {
+    backup
+        .remotes
+        .iter()
+        .enumerate()
+        .filter(|(_, remote)| remote.is_configured())
+        .map(|(index, remote)| (remote.display_name(index), remote))
+        .collect()
+}
+
+fn select_backup_remotes<'a>(
+    backup: &'a BackupConfig,
+    remote_name: Option<&str>,
+) -> Result<Vec<(String, &'a BackupRemoteConfig)>> {
+    let configured = configured_backup_remotes(backup);
+    let Some(target) = remote_name.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(configured);
+    };
+    configured
+        .into_iter()
+        .find(|(name, _)| name == target)
+        .map(|remote| vec![remote])
+        .ok_or_else(|| anyhow::anyhow!("未找到名为 {target} 的备份端"))
 }
 
 fn find_backup_remote<'a>(
@@ -1219,11 +1258,9 @@ fn find_backup_remote<'a>(
     remote_name: &str,
 ) -> Option<&'a BackupRemoteConfig> {
     let target = remote_name.trim();
-    backup
-        .remotes
-        .iter()
-        .enumerate()
-        .find(|(index, remote)| remote.is_configured() && remote.display_name(*index) == target)
+    configured_backup_remotes(backup)
+        .into_iter()
+        .find(|(name, _)| name == target)
         .map(|(_, remote)| remote)
 }
 
@@ -1487,5 +1524,81 @@ mod tests {
         assert!(!should_fail_snapshot_listing(1, 0));
         assert!(!should_fail_snapshot_listing(0, 0));
         assert!(should_fail_snapshot_listing(0, 1));
+    }
+
+    #[test]
+    fn configured_backup_remotes_preserve_display_order() {
+        let mut backup = BackupConfig::default();
+        backup.remotes = vec![
+            BackupRemoteConfig::default(),
+            BackupRemoteConfig {
+                name: "west".to_string(),
+                endpoint: "https://west.example.com".to_string(),
+                bucket: "bucket-west".to_string(),
+                access_key_id: "key-west".to_string(),
+                secret_access_key: "secret-west".to_string(),
+                ..BackupRemoteConfig::default()
+            },
+            BackupRemoteConfig {
+                name: "east".to_string(),
+                endpoint: "https://east.example.com".to_string(),
+                bucket: "bucket-east".to_string(),
+                access_key_id: "key-east".to_string(),
+                secret_access_key: "secret-east".to_string(),
+                ..BackupRemoteConfig::default()
+            },
+        ];
+
+        let configured = configured_backup_remotes(&backup);
+
+        assert_eq!(configured.len(), 2);
+        assert_eq!(configured[0].0, "west");
+        assert_eq!(configured[1].0, "east");
+    }
+
+    #[test]
+    fn select_backup_remotes_returns_only_requested_remote() {
+        let mut backup = BackupConfig::default();
+        backup.remotes = vec![
+            BackupRemoteConfig {
+                name: "west".to_string(),
+                endpoint: "https://west.example.com".to_string(),
+                bucket: "bucket-west".to_string(),
+                access_key_id: "key-west".to_string(),
+                secret_access_key: "secret-west".to_string(),
+                ..BackupRemoteConfig::default()
+            },
+            BackupRemoteConfig {
+                name: "east".to_string(),
+                endpoint: "https://east.example.com".to_string(),
+                bucket: "bucket-east".to_string(),
+                access_key_id: "key-east".to_string(),
+                secret_access_key: "secret-east".to_string(),
+                ..BackupRemoteConfig::default()
+            },
+        ];
+
+        let configured = select_backup_remotes(&backup, Some("east")).unwrap();
+
+        assert_eq!(configured.len(), 1);
+        assert_eq!(configured[0].0, "east");
+        assert_eq!(configured[0].1.bucket, "bucket-east");
+    }
+
+    #[test]
+    fn select_backup_remotes_rejects_unknown_remote_name() {
+        let mut backup = BackupConfig::default();
+        backup.remotes = vec![BackupRemoteConfig {
+            name: "west".to_string(),
+            endpoint: "https://west.example.com".to_string(),
+            bucket: "bucket-west".to_string(),
+            access_key_id: "key-west".to_string(),
+            secret_access_key: "secret-west".to_string(),
+            ..BackupRemoteConfig::default()
+        }];
+
+        let error = select_backup_remotes(&backup, Some("missing")).unwrap_err();
+
+        assert!(error.to_string().contains("未找到名为 missing 的备份端"));
     }
 }

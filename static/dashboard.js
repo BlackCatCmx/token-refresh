@@ -918,8 +918,74 @@ const backupRestoreState = {
   needsPassword: false,
 };
 
-async function runBackupNow() {
-  const data = await api("api/backup/run", { method: "POST" });
+const backupRunState = {
+  remotes: [],
+  selectedIndex: null,
+};
+
+async function openBackupRunModal() {
+  try {
+    await loadBackupStatus();
+    backupRunState.remotes = Array.isArray(backupStatusCache?.configured_remote_names)
+      ? backupStatusCache.configured_remote_names
+      : [];
+    backupRunState.selectedIndex = null;
+    const list = document.getElementById("backup-run-list");
+    if (!backupRunState.remotes.length) {
+      list.innerHTML = `<div class="empty-hint">当前没有可用备份端</div>`;
+    } else {
+      list.innerHTML = backupRunState.remotes.map((remoteName, index) => `
+        <div class="backup-snapshot-item">
+          <label>
+            <input type="radio" name="backup-run-remote" value="${index}" onchange="selectBackupRunRemote(${index})">
+            <span class="backup-snapshot-meta">
+              <span>${escapeHtml(remoteName)}</span>
+              <span class="muted">${index === 0 ? "当前第一顺位备份端" : `当前第 ${index + 1} 顺位备份端`}</span>
+            </span>
+          </label>
+        </div>
+      `).join("");
+    }
+    syncBackupRunConfirm();
+    const modal = document.getElementById("backup-run-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    document.body.classList.add("modal-open");
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function closeBackupRunModal() {
+  backupRunState.remotes = [];
+  backupRunState.selectedIndex = null;
+  const modal = document.getElementById("backup-run-modal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function selectBackupRunRemote(index) {
+  backupRunState.selectedIndex = Number(index);
+  syncBackupRunConfirm();
+}
+
+function syncBackupRunConfirm() {
+  document.getElementById("backup-run-submit").disabled = !Number.isInteger(backupRunState.selectedIndex);
+}
+
+async function submitBackupRun() {
+  const remoteName = backupRunState.remotes[backupRunState.selectedIndex];
+  if (!remoteName) {
+    alert("请选择一个备份端");
+    return;
+  }
+  const data = await api("api/backup/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ remote_name: remoteName }),
+  });
+  closeBackupRunModal();
   await loadBackupStatus();
   await loadScheduler();
   const remoteLabel = data.snapshot?.remote_name ? `${data.snapshot.remote_name} / ` : "";
@@ -1410,7 +1476,10 @@ window.runCpaInspectOnce = runCpaInspectOnce;
 window.reloadCpaLog = reloadCpaLog;
 window.downloadCpaLog = downloadCpaLog;
 window.clearCpaLog = clearCpaLog;
-window.runBackupNow = runBackupNow;
+window.openBackupRunModal = openBackupRunModal;
+window.closeBackupRunModal = closeBackupRunModal;
+window.selectBackupRunRemote = selectBackupRunRemote;
+window.submitBackupRun = submitBackupRun;
 window.openBackupRestoreModal = openBackupRestoreModal;
 window.closeBackupRestoreModal = closeBackupRestoreModal;
 window.selectBackupSnapshot = selectBackupSnapshot;
@@ -1432,6 +1501,10 @@ document.addEventListener("DOMContentLoaded", () => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !document.getElementById("credential-editor-modal").classList.contains("hidden")) {
     closeCredentialEditor();
+    return;
+  }
+  if (event.key === "Escape" && !document.getElementById("backup-run-modal").classList.contains("hidden")) {
+    closeBackupRunModal();
     return;
   }
   if (event.key === "Escape" && !document.getElementById("backup-restore-modal").classList.contains("hidden")) {

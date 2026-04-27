@@ -807,8 +807,18 @@ async fn list_backup_snapshots(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-async fn run_backup_now(State(state): State<Arc<AppState>>) -> Response {
-    match state.backup.run_manual_backup().await {
+#[derive(Debug, Deserialize, Default)]
+struct RunBackupNowRequest {
+    #[serde(default)]
+    remote_name: Option<String>,
+}
+
+async fn run_backup_now(
+    State(state): State<Arc<AppState>>,
+    payload: Option<Json<RunBackupNowRequest>>,
+) -> Response {
+    let remote_name = payload.and_then(|Json(payload)| payload.remote_name);
+    match state.backup.run_manual_backup(remote_name.as_deref()).await {
         Ok(snapshot) => Json(serde_json::json!({ "snapshot": snapshot })).into_response(),
         Err(err) => json_error(backup_error_status(&err), &err.to_string()),
     }
