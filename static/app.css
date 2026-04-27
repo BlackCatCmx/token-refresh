@@ -580,6 +580,19 @@ select:disabled, input:disabled, textarea:disabled {
   cursor: pointer;
 }
 
+.backup-snapshot-item label input[type="radio"] {
+  width: auto;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+}
+
+#backup-run-modal .backup-snapshot-item label {
+  align-items: center;
+}
+
 .backup-snapshot-meta {
   display: grid;
   gap: 2px;
