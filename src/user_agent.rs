@@ -344,7 +344,7 @@ fn parse_mode(value: &str) -> Result<UserAgentMode> {
 
 fn parse_version_tokens(value: &str) -> Result<Vec<String>> {
     let mut versions = Vec::new();
-    for token in split_rule_lines(value) {
+    for token in split_version_rule_tokens(value) {
         if let Some((start, end)) = token.split_once(" - ") {
             versions.extend(expand_version_range(start.trim(), end.trim())?);
             continue;
@@ -467,6 +467,15 @@ fn split_rule_lines(value: &str) -> Vec<&str> {
         .collect()
 }
 
+fn split_version_rule_tokens(value: &str) -> Vec<&str> {
+    value
+        .lines()
+        .flat_map(|line| line.split([',', ';']))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
 fn dedup_preserving_order(values: Vec<String>) -> Vec<String> {
     let mut unique = Vec::new();
     for value in values {
@@ -478,7 +487,7 @@ fn dedup_preserving_order(values: Vec<String>) -> Vec<String> {
 }
 
 fn default_generated_versions() -> String {
-    "0.114.0 - 0.118.0".to_string()
+    "0.114.0\n0.115.0\n0.116.0\n0.117.0\n0.118.0".to_string()
 }
 
 fn default_generated_profiles() -> String {
@@ -525,6 +534,18 @@ mod tests {
             versions,
             vec!["0.114.0", "0.115.0", "0.116.0", "0.117.0", "0.118.0"]
         );
+    }
+
+    #[test]
+    fn parses_delimited_version_list() {
+        let versions = parse_version_tokens("0.116.0, 0.117.0;0.119.0\r\n0.120.0,0.117.0").unwrap();
+        assert_eq!(versions, vec!["0.116.0", "0.117.0", "0.119.0", "0.120.0"]);
+    }
+
+    #[test]
+    fn parses_mixed_version_ranges_and_delimiters() {
+        let versions = parse_version_tokens("0.114.0 - 0.115.0, 0.117.0; 0.115.0").unwrap();
+        assert_eq!(versions, vec!["0.114.0", "0.115.0", "0.117.0"]);
     }
 
     #[test]

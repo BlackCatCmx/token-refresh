@@ -11,7 +11,11 @@ request_identity:
   user_agent_mode: "generated"
   user_agent_rules:
     versions: |
-      0.114.0 - 0.118.0
+      0.114.0
+      0.115.0
+      0.116.0
+      0.117.0
+      0.118.0
     profiles: |
       windows10
       windows11
