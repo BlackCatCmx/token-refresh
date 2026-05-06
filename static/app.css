@@ -369,6 +369,40 @@ select:disabled, input:disabled, textarea:disabled {
   margin-bottom: 0;
 }
 
+.credential-search-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.credential-search-label {
+  margin: 0;
+}
+
+.credential-search-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.credential-search-control input {
+  min-width: 0;
+}
+
+.credential-search-clear {
+  min-width: 42px;
+  padding-left: 0;
+  padding-right: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.credential-search-status {
+  min-height: 20px;
+  font-size: 13px;
+}
+
 /* ── Credential Cards ── */
 .cred-grid {
   display: grid;

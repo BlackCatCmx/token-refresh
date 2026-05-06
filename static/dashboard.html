@@ -89,6 +89,32 @@
         <div id="backup-meta" class="muted"></div>
       </section>
       <section class="full-width">
+        <div class="credential-search-panel">
+          <label class="block-label credential-search-label" for="credential-search-input">搜索凭证</label>
+          <div class="credential-search-control">
+            <input
+              id="credential-search-input"
+              type="text"
+              inputmode="search"
+              enterkeyhint="search"
+              placeholder="搜索凭证（至少 2 个字符）"
+              autocomplete="off"
+              spellcheck="false"
+              oninput="handleCredentialSearchInput()"
+              aria-describedby="credential-search-status">
+            <button
+              type="button"
+              class="secondary credential-search-clear"
+              id="credential-search-clear"
+              onclick="clearCredentialSearch()"
+              aria-label="清空搜索"
+              title="退出搜索"
+              hidden>x</button>
+          </div>
+          <div id="credential-search-status" class="credential-search-status muted" aria-live="polite"></div>
+        </div>
+      </section>
+      <section class="full-width">
         <div class="section-header">
           <h2>正常区凭证<span id="normal-count" class="cred-count"></span></h2>
           <div class="toolbar">

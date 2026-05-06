@@ -8,6 +8,10 @@ const credState = {
   normal: { page: 1, data: [], selected: new Set() },
   abnormal: { page: 1, data: [], selected: new Set() },
 };
+const credentialSearchState = {
+  query: "",
+  minLength: 2,
+};
 // Keep this aligned with the backend clamp in src/api.rs.
 const LOG_LINE_LIMIT = 50;
 // Deterministic abnormal credential codes mirrored from backend refresh classification.
@@ -563,8 +567,6 @@ async function saveSettings() {
 
 async function loadCredentials(zone) {
   const data = await api(`api/credentials?zone=${zone}`);
-  const countEl = document.getElementById(`${zone}-count`);
-  if (countEl) countEl.textContent = `(${data.items.length})`;
   const selected = credState[zone].selected;
   const validNames = new Set(data.items.map((item) => item.name));
   credState[zone].data = data.items;
@@ -572,12 +574,107 @@ async function loadCredentials(zone) {
     Array.from(selected).filter((name) => validNames.has(name))
   );
   renderCredentials(zone);
+  renderCredentialSearchState();
+}
+
+function normalizeCredentialSearchQuery(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function isCredentialSearchActive() {
+  return credentialSearchState.query.length >= credentialSearchState.minLength;
+}
+
+function buildCredentialSearchText(row) {
+  return [
+    row.name,
+    row.email,
+    row.account_id,
+  ]
+    .filter((value) => value)
+    .join("\n")
+    .toLowerCase();
+}
+
+function matchesCredentialSearch(row, query) {
+  return buildCredentialSearchText(row).includes(query);
+}
+
+function getVisibleCredentialRows(zone) {
+  const rows = credState[zone].data;
+  if (!isCredentialSearchActive()) return rows;
+  return rows.filter((row) => matchesCredentialSearch(row, credentialSearchState.query));
+}
+
+function updateCredentialCount(zone, visibleCount, totalCount) {
+  const countEl = document.getElementById(`${zone}-count`);
+  if (!countEl) return;
+  countEl.textContent = isCredentialSearchActive()
+    ? `(${visibleCount}/${totalCount})`
+    : `(${totalCount})`;
+}
+
+function renderCredentialSearchState() {
+  const input = document.getElementById("credential-search-input");
+  const clearBtn = document.getElementById("credential-search-clear");
+  const status = document.getElementById("credential-search-status");
+  if (!input || !clearBtn || !status) return;
+  clearBtn.hidden = input.value.length === 0;
+  status.className = "credential-search-status muted";
+
+  const query = credentialSearchState.query;
+  if (!query) {
+    status.textContent = "";
+    return;
+  }
+  if (!isCredentialSearchActive()) {
+    status.textContent = `至少输入 ${credentialSearchState.minLength} 个字符后开始过滤`;
+    return;
+  }
+
+  const normalMatches = getVisibleCredentialRows("normal").length;
+  const abnormalMatches = getVisibleCredentialRows("abnormal").length;
+  const totalMatches = normalMatches + abnormalMatches;
+  if (totalMatches === 0) {
+    status.textContent = "没有匹配的凭证";
+    status.className = "credential-search-status warn-text";
+    return;
+  }
+  status.textContent = `已筛选：正常区 ${normalMatches} 条，异常区 ${abnormalMatches} 条`;
+}
+
+function updateCredentialSearch(rawValue) {
+  const nextQuery = normalizeCredentialSearchQuery(rawValue);
+  if (nextQuery === credentialSearchState.query) {
+    renderCredentialSearchState();
+    return;
+  }
+  credentialSearchState.query = nextQuery;
+  credState.normal.page = 1;
+  credState.abnormal.page = 1;
+  renderCredentialSearchState();
+  renderCredentials("normal");
+  renderCredentials("abnormal");
+}
+
+function handleCredentialSearchInput() {
+  updateCredentialSearch(document.getElementById("credential-search-input")?.value || "");
+}
+
+function clearCredentialSearch() {
+  const input = document.getElementById("credential-search-input");
+  if (!input) return;
+  input.value = "";
+  updateCredentialSearch("");
+  input.focus();
 }
 
 function renderCredentials(zone) {
-  const { data, page } = credState[zone];
+  const { page } = credState[zone];
+  const data = getVisibleCredentialRows(zone);
   const ps = credPageSize;
   const total = data.length;
+  updateCredentialCount(zone, total, credState[zone].data.length);
   const totalPages = Math.max(1, Math.ceil(total / ps));
   const clampedPage = Math.min(Math.max(1, page), totalPages);
   if (clampedPage !== credState[zone].page) credState[zone].page = clampedPage;
@@ -588,7 +685,10 @@ function renderCredentials(zone) {
   container.innerHTML = "";
 
   if (total === 0) {
-    container.innerHTML = `<div class="empty-hint">暂无凭证</div>`;
+    const emptyText = isCredentialSearchActive()
+      ? "没有匹配的凭证"
+      : "暂无凭证";
+    container.innerHTML = `<div class="empty-hint">${emptyText}</div>`;
   } else {
     for (const row of pageItems) {
       container.appendChild(buildCredCard(zone, row));
@@ -671,13 +771,20 @@ function goCredPage(zone, page) {
 }
 
 function selectedNames(zone) {
-  return Array.from(credState[zone].selected);
+  const visibleNames = new Set(getVisibleCredentialRows(zone).map((row) => row.name));
+  return Array.from(credState[zone].selected).filter((name) => visibleNames.has(name));
 }
 
 function toggleAll(zone, checked) {
-  credState[zone].selected = checked
-    ? new Set(credState[zone].data.map((row) => row.name))
-    : new Set();
+  const nextSelected = new Set(credState[zone].selected);
+  for (const row of getVisibleCredentialRows(zone)) {
+    if (checked) {
+      nextSelected.add(row.name);
+    } else {
+      nextSelected.delete(row.name);
+    }
+  }
+  credState[zone].selected = nextSelected;
   renderCredentials(zone);
 }
 
@@ -694,8 +801,10 @@ function toggleRowSelection(zone, name, checked) {
 function updateSelectAllControl(zone) {
   const selectAll = document.getElementById(`${zone}-select-all`);
   if (!selectAll) return;
-  const total = credState[zone].data.length;
-  const selectedCount = credState[zone].selected.size;
+  const visibleRows = getVisibleCredentialRows(zone);
+  const total = visibleRows.length;
+  const visibleNames = new Set(visibleRows.map((row) => row.name));
+  const selectedCount = Array.from(credState[zone].selected).filter((name) => visibleNames.has(name)).length;
   if (total === 0) {
     selectAll.indeterminate = false;
     selectAll.checked = false;
@@ -1489,6 +1598,8 @@ window.reloadLog = reloadLog;
 window.downloadLog = downloadLog;
 window.clearLog = clearLog;
 window.logout = logout;
+window.handleCredentialSearchInput = handleCredentialSearchInput;
+window.clearCredentialSearch = clearCredentialSearch;
 window.toggleAll = toggleAll;
 window.toggleRowSelection = toggleRowSelection;
 window.goCredPage = goCredPage;
