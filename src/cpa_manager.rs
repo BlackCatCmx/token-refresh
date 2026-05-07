@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -14,9 +14,9 @@ use crate::cpa_client::{CpaAuthEntry, CpaClient};
 use crate::cpa_config::CpaConfig;
 use crate::cpa_log::CpaLog;
 use crate::credential::{CodexCredentialFile, parse_rfc3339};
-use crate::credential_store::{CredentialStore, CredentialZone};
+use crate::credential_store::{CredentialEntry, CredentialStore, CredentialZone};
 use crate::scheduler::SchedulerHandle as RefreshSchedulerHandle;
-use crate::status::{CredentialStatusStore, normalize_status_key};
+use crate::status::{CredentialStatusRecord, CredentialStatusStore, normalize_status_key};
 use crate::write_coordinator::WriteCoordinator;
 
 const EXHAUSTED_RESET_FALLBACK_HOURS: i64 = 7 * 24 + 12;
@@ -55,6 +55,20 @@ pub struct ReclaimResult {
     pub imported_exhausted: usize,
     pub cleaned_disabled_residual: usize,
     pub skipped: usize,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ManualSupplementResult {
+    pub started_at: String,
+    pub finished_at: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub requested: usize,
+    pub eligible: usize,
+    pub supplemented: usize,
+    pub supplemented_names: Vec<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -502,6 +516,126 @@ impl CpaManager {
         self.finish_reclaim_result(result)
     }
 
+    pub async fn supplement_once(
+        &self,
+        cfg: &CpaConfig,
+        requested: usize,
+    ) -> ManualSupplementResult {
+        let started_at = Utc::now().to_rfc3339();
+        let guard = match self.running.clone().try_lock_owned() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return self.finish_manual_supplement_result(ManualSupplementResult {
+                    started_at,
+                    finished_at: String::new(),
+                    ok: false,
+                    error: Some("CPA 操作正在执行中".to_string()),
+                    requested,
+                    ..ManualSupplementResult::default()
+                });
+            }
+        };
+        self.running_flag.store(true, Ordering::SeqCst);
+        let _running_guard = RunningFlagGuard {
+            flag: &self.running_flag,
+            _guard: guard,
+        };
+        self.log_best_effort(format!(
+            "[INFO] CPA manual supplement started requested={requested}"
+        ));
+
+        let mut result = ManualSupplementResult {
+            started_at,
+            finished_at: String::new(),
+            ok: false,
+            error: None,
+            requested,
+            eligible: 0,
+            supplemented: 0,
+            supplemented_names: Vec::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        let mut local_changed = false;
+
+        if requested == 0 {
+            result.error = Some("补充数量必须大于 0".to_string());
+            return self.finish_manual_supplement_result(result);
+        }
+
+        if let Err(err) = self.write_coordinator.ensure_writes_allowed() {
+            result.error = Some(err.to_string());
+            return self.finish_manual_supplement_result(result);
+        }
+
+        let client = match CpaClient::new(&cfg.base_url, &cfg.management_key) {
+            Ok(client) => client,
+            Err(err) => {
+                result.error = Some(err.to_string());
+                return self.finish_manual_supplement_result(result);
+            }
+        };
+
+        let remaining = match client.list_codex_files().await {
+            Ok(entries) => entries,
+            Err(err) => {
+                result.error = Some(err.to_string());
+                return self.finish_manual_supplement_result(result);
+            }
+        };
+        let remaining_active: Vec<CpaAuthEntry> = remaining
+            .into_iter()
+            .filter(|entry| !is_disabled_entry(entry))
+            .collect();
+
+        match self
+            .supplement_from_local(&client, requested, &remaining_active)
+            .await
+        {
+            Ok(summary) => {
+                local_changed |= summary.local_changed;
+                result.eligible = summary.eligible;
+                result.supplemented = summary.done;
+                result.supplemented_names = summary.names;
+                result.errors.extend(summary.errors);
+                if result.eligible < requested {
+                    let message = if result.eligible == 0 {
+                        "当前没有符合条件的正常区凭证可补充".to_string()
+                    } else {
+                        format!(
+                            "当前仅有 {} 个符合条件的正常区账号，已按最大数量尝试补充",
+                            result.eligible
+                        )
+                    };
+                    self.log_best_effort(format!("[WARN] {message}"));
+                    result.warnings.push(message);
+                }
+            }
+            Err(err) => {
+                let message = format!("手动补充凭证失败: {err:#}");
+                self.log_best_effort(format!("[ERROR] {message}"));
+                result.errors.push(message);
+            }
+        }
+
+        if local_changed {
+            self.backup.mark_dirty("cpa_manual_supplement");
+            self.scheduler.wake();
+        }
+
+        recompute_manual_supplement_ok(&mut result);
+        self.log_best_effort(format!(
+            "[INFO] CPA manual supplement finished ok={} requested={} eligible={} supplemented={} warnings={} errors={}",
+            result.ok,
+            result.requested,
+            result.eligible,
+            result.supplemented,
+            result.warnings.len(),
+            result.errors.len()
+        ));
+        self.finish_manual_supplement_result(result)
+    }
+
     fn finish_result(&self, mut result: InspectResult) -> InspectResult {
         if result.finished_at.is_empty() {
             result.finished_at = Utc::now().to_rfc3339();
@@ -513,6 +647,16 @@ impl CpaManager {
     }
 
     fn finish_reclaim_result(&self, mut result: ReclaimResult) -> ReclaimResult {
+        if result.finished_at.is_empty() {
+            result.finished_at = Utc::now().to_rfc3339();
+        }
+        result
+    }
+
+    fn finish_manual_supplement_result(
+        &self,
+        mut result: ManualSupplementResult,
+    ) -> ManualSupplementResult {
         if result.finished_at.is_empty() {
             result.finished_at = Utc::now().to_rfc3339();
         }
@@ -567,7 +711,7 @@ impl CpaManager {
                 return Err(err);
             }
         };
-        let _credential = match validate_credential_bytes(&bytes) {
+        let _credential = match validate_credential_bytes(&bytes, "CPA 返回的凭证") {
             Ok(credential) => credential,
             Err(err) => {
                 self.reenable_best_effort(client, &entry.name).await;
@@ -688,53 +832,26 @@ impl CpaManager {
         need: usize,
         remaining_active: &[CpaAuthEntry],
     ) -> Result<SupplementSummary> {
-        let statuses = self.status_store.all()?;
-        let mut cpa_emails: HashSet<String> = remaining_active
-            .iter()
-            .filter_map(|entry| normalize_email(entry.email.as_deref()))
-            .collect();
-        let mut selected_emails = HashSet::new();
-        let mut summary = SupplementSummary::default();
+        let candidates = self.collect_supplement_candidate_keys(remaining_active)?;
+        let mut summary = SupplementSummary {
+            eligible: candidates.len(),
+            ..SupplementSummary::default()
+        };
 
-        for entry in self.store.scan_zone(CredentialZone::Normal)? {
-            if summary.done >= need {
-                break;
-            }
-            let Some(credential) = entry.credential.as_ref() else {
-                continue;
-            };
-            if entry.parse_error.is_some() || credential.refresh_token.trim().is_empty() {
-                continue;
-            }
-            let Some(email) = normalize_email(credential.email.as_deref()) else {
-                continue;
-            };
-            let status_key = normalize_status_key(&entry.key);
-            if statuses
-                .get(&status_key)
-                .and_then(|record| record.cpa_exhausted)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if cpa_emails.contains(&email) || selected_emails.contains(&email) {
-                continue;
-            }
-            match self.supplement_to_cpa(client, &entry.key).await {
+        for local_key in candidates.into_iter().take(need) {
+            match self.supplement_to_cpa(client, &local_key).await {
                 Ok(outcome) => {
                     summary.local_changed |= outcome.local_changed;
                     if outcome.done {
                         summary.done += 1;
-                        summary.names.push(entry.key.clone());
-                        cpa_emails.insert(email.clone());
-                        selected_emails.insert(email);
+                        summary.names.push(local_key.clone());
                     }
                     if let Some(message) = outcome.message {
                         summary.errors.push(message);
                     }
                 }
                 Err(err) => {
-                    let message = format!("补号失败 {}: {err:#}", entry.key);
+                    let message = format!("补号失败 {}: {err:#}", local_key);
                     self.log_best_effort(format!("[ERROR] {message}"));
                     summary.errors.push(message);
                 }
@@ -742,6 +859,19 @@ impl CpaManager {
         }
 
         Ok(summary)
+    }
+
+    fn collect_supplement_candidate_keys(
+        &self,
+        remaining_active: &[CpaAuthEntry],
+    ) -> Result<Vec<String>> {
+        let entries = self.store.scan_zone(CredentialZone::Normal)?;
+        let statuses = self.status_store.all()?;
+        Ok(select_supplement_candidate_keys(
+            &entries,
+            &statuses,
+            remaining_active,
+        ))
     }
 
     async fn supplement_to_cpa(
@@ -754,7 +884,7 @@ impl CpaManager {
         self.write_coordinator.ensure_writes_allowed()?;
 
         let bytes = self.store.read_bytes(CredentialZone::Normal, local_key)?;
-        validate_credential_bytes(&bytes)?;
+        validate_credential_bytes(&bytes, "待补充的本地凭证")?;
         let remote_name = file_name_from_key(local_key);
 
         client.upload_file(&remote_name, &bytes).await?;
@@ -861,6 +991,7 @@ impl Drop for RunningFlagGuard<'_> {
 
 #[derive(Default)]
 struct SupplementSummary {
+    eligible: usize,
     done: usize,
     names: Vec<String>,
     errors: Vec<String>,
@@ -993,6 +1124,10 @@ fn recompute_reclaim_ok(result: &mut ReclaimResult) {
     result.ok = result.error.is_none() && result.errors.is_empty();
 }
 
+fn recompute_manual_supplement_ok(result: &mut ManualSupplementResult) {
+    result.ok = result.error.is_none() && result.errors.is_empty();
+}
+
 fn cpa_failure_reason(entry: &CpaAuthEntry, default_reason: &str) -> String {
     let trimmed = entry.status_message.trim();
     if trimmed.is_empty() {
@@ -1002,16 +1137,55 @@ fn cpa_failure_reason(entry: &CpaAuthEntry, default_reason: &str) -> String {
     }
 }
 
-fn validate_credential_bytes(bytes: &[u8]) -> Result<CodexCredentialFile> {
+fn validate_credential_bytes(bytes: &[u8], source_label: &str) -> Result<CodexCredentialFile> {
     let credential: CodexCredentialFile =
-        serde_json::from_slice(bytes).context("CPA 返回的凭证不是有效 JSON")?;
+        serde_json::from_slice(bytes).with_context(|| format!("{source_label}不是有效 JSON"))?;
     if !credential.is_codex() {
-        anyhow::bail!("CPA 返回的凭证 type 不是 codex");
+        anyhow::bail!("{source_label} type 不是 codex");
     }
     if credential.refresh_token.trim().is_empty() {
-        anyhow::bail!("CPA 返回的凭证缺少 refresh_token");
+        anyhow::bail!("{source_label}缺少 refresh_token");
     }
     Ok(credential)
+}
+
+fn select_supplement_candidate_keys(
+    entries: &[CredentialEntry],
+    statuses: &BTreeMap<String, CredentialStatusRecord>,
+    remaining_active: &[CpaAuthEntry],
+) -> Vec<String> {
+    let mut occupied_emails: HashSet<String> = remaining_active
+        .iter()
+        .filter_map(|entry| normalize_email(entry.email.as_deref()))
+        .collect();
+    let mut selected = Vec::new();
+
+    for entry in entries {
+        let Some(credential) = entry.credential.as_ref() else {
+            continue;
+        };
+        if entry.parse_error.is_some() || credential.refresh_token.trim().is_empty() {
+            continue;
+        }
+        let Some(email) = normalize_email(credential.email.as_deref()) else {
+            continue;
+        };
+        let status_key = normalize_status_key(&entry.key);
+        if statuses
+            .get(&status_key)
+            .and_then(|record| record.cpa_exhausted)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if occupied_emails.contains(&email) {
+            continue;
+        }
+        occupied_emails.insert(email);
+        selected.push(entry.key.clone());
+    }
+
+    selected
 }
 
 fn normalize_email(value: Option<&str>) -> Option<String> {
@@ -1046,6 +1220,7 @@ async fn rollback_remote_best_effort(client: &CpaClient, remote_name: &str, cpa_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn classifies_unauthorized_entries() {
@@ -1247,5 +1422,88 @@ mod tests {
             normalize_email(Some(" User@Example.com ")).as_deref(),
             Some("user@example.com")
         );
+    }
+
+    #[test]
+    fn supplement_candidates_skip_exhausted_duplicates_and_invalid_entries() {
+        let entries = vec![
+            make_entry(
+                "available-a.json",
+                Some("available-a@example.com"),
+                Some("refresh-a"),
+            ),
+            make_entry(
+                "duplicate-a.json",
+                Some("available-a@example.com"),
+                Some("refresh-b"),
+            ),
+            make_entry("on-cpa.json", Some("on-cpa@example.com"), Some("refresh-c")),
+            make_entry(
+                "exhausted.json",
+                Some("exhausted@example.com"),
+                Some("refresh-d"),
+            ),
+            make_entry(
+                "missing-refresh.json",
+                Some("missing@example.com"),
+                Some(""),
+            ),
+            make_entry("missing-email.json", None, Some("refresh-e")),
+            make_parse_error_entry("broken.json"),
+            make_entry(
+                "available-b.json",
+                Some("available-b@example.com"),
+                Some("refresh-f"),
+            ),
+        ];
+        let mut exhausted_status = CredentialStatusRecord::default();
+        exhausted_status.cpa_exhausted = Some(true);
+        let statuses = BTreeMap::from([(normalize_status_key("exhausted.json"), exhausted_status)]);
+        let remaining_active = vec![CpaAuthEntry {
+            name: "remote.json".to_string(),
+            email: Some("on-cpa@example.com".to_string()),
+            status: "active".to_string(),
+            status_message: String::new(),
+            disabled: false,
+            unavailable: false,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        }];
+
+        let selected = select_supplement_candidate_keys(&entries, &statuses, &remaining_active);
+
+        assert_eq!(
+            selected,
+            vec![
+                "available-a.json".to_string(),
+                "available-b.json".to_string()
+            ]
+        );
+    }
+
+    fn make_entry(key: &str, email: Option<&str>, refresh_token: Option<&str>) -> CredentialEntry {
+        CredentialEntry {
+            zone: CredentialZone::Normal,
+            key: key.to_string(),
+            path: PathBuf::from(key),
+            credential: Some(CodexCredentialFile {
+                provider_type: "codex".to_string(),
+                email: email.map(str::to_string),
+                refresh_token: refresh_token.unwrap_or_default().to_string(),
+                ..CodexCredentialFile::default()
+            }),
+            parse_error: None,
+        }
+    }
+
+    fn make_parse_error_entry(key: &str) -> CredentialEntry {
+        CredentialEntry {
+            zone: CredentialZone::Normal,
+            key: key.to_string(),
+            path: PathBuf::from(key),
+            credential: None,
+            parse_error: Some("invalid json".to_string()),
+        }
     }
 }

@@ -515,6 +515,10 @@ select:disabled, input:disabled, textarea:disabled {
   padding: 20px;
 }
 
+.modal-dialog--compact {
+  width: min(520px, calc(100vw - 32px));
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -659,6 +663,12 @@ select:disabled, input:disabled, textarea:disabled {
 .backup-confirm-input {
   width: 100%;
   margin-top: 8px;
+}
+
+.cpa-supplement-body {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
 }
 
 .backup-restore-warnings {

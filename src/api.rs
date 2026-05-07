@@ -86,6 +86,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/cpa/status", get(get_cpa_status))
         .route("/api/cpa/reclaim-all", post(run_cpa_reclaim_all))
         .route("/api/cpa/inspect-once", post(run_cpa_inspect_once))
+        .route("/api/cpa/supplement", post(run_cpa_supplement))
         .route("/api/cpa/logs", get(get_cpa_logs))
         .route("/api/cpa/logs/download", get(download_cpa_logs))
         .route("/api/cpa/logs/clear", post(clear_cpa_logs))
@@ -1082,6 +1083,26 @@ async fn run_cpa_inspect_once(State(state): State<Arc<AppState>>) -> Response {
 async fn run_cpa_reclaim_all(State(state): State<Arc<AppState>>) -> Response {
     let config = state.cpa_config.get();
     let result = state.cpa_manager.reclaim_all(&config).await;
+    Json(result).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct CpaSupplementRequest {
+    count: usize,
+}
+
+async fn run_cpa_supplement(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CpaSupplementRequest>,
+) -> Response {
+    if payload.count == 0 {
+        return json_error(StatusCode::BAD_REQUEST, "补充数量必须大于 0");
+    }
+    let config = state.cpa_config.get();
+    let result = state
+        .cpa_manager
+        .supplement_once(&config, payload.count)
+        .await;
     Json(result).into_response()
 }
 

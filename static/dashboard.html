@@ -153,6 +153,7 @@
           <h2>巡查操作</h2>
           <div class="toolbar">
             <button type="button" class="secondary" id="cpa-reclaim-btn" onclick="runCpaReclaimAll()">取回凭证</button>
+            <button type="button" class="secondary" id="cpa-supplement-btn" onclick="openCpaSupplementModal()">补充凭证</button>
             <button type="button" id="cpa-inspect-btn" onclick="runCpaInspectOnce()">立即巡查</button>
           </div>
         </div>
@@ -354,6 +355,26 @@
       <div class="modal-footer">
         <button type="button" class="secondary" onclick="closeBackupRestoreModal()">取消</button>
         <button type="button" class="danger" id="backup-restore-submit" onclick="submitBackupRestore()" disabled>确认还原</button>
+      </div>
+    </div>
+  </div>
+  <div id="cpa-supplement-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" onclick="closeCpaSupplementModal()"></div>
+    <div class="modal-dialog modal-dialog--compact" role="dialog" aria-modal="true" aria-labelledby="cpa-supplement-title">
+      <div class="modal-header">
+        <div>
+          <h2 id="cpa-supplement-title">补充凭证</h2>
+          <div class="muted">只会从正常区选择未标记为耗尽、refresh_token 完整、且 CPA 中不存在同邮箱的凭证。</div>
+        </div>
+        <button type="button" class="secondary modal-close" aria-label="关闭" onclick="closeCpaSupplementModal()">X</button>
+      </div>
+      <div class="cpa-supplement-body">
+        <label class="backup-password-label" for="cpa-supplement-count">需要补充的凭证数量</label>
+        <input id="cpa-supplement-count" type="number" class="backup-confirm-input" min="1" step="1" inputmode="numeric" placeholder="请输入大于 0 的整数">
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="secondary" onclick="closeCpaSupplementModal()">取消</button>
+        <button type="button" id="cpa-supplement-submit" onclick="submitCpaSupplement()">开始补充</button>
       </div>
     </div>
   </div>

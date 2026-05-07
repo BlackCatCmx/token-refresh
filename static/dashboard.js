@@ -1278,6 +1278,76 @@ async function reassignAllUserAgents() {
   alert(formatUserAgentPatchMessage("重配 UA-全量", data));
 }
 
+function openCpaSupplementModal() {
+  const modal = document.getElementById("cpa-supplement-modal");
+  const input = document.getElementById("cpa-supplement-count");
+  const submitBtn = document.getElementById("cpa-supplement-submit");
+  input.value = "";
+  submitBtn.disabled = false;
+  submitBtn.classList.remove("loading");
+  submitBtn.textContent = "开始补充";
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  setTimeout(() => input.focus(), 0);
+}
+
+function closeCpaSupplementModal() {
+  const modal = document.getElementById("cpa-supplement-modal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+async function submitCpaSupplement() {
+  const input = document.getElementById("cpa-supplement-count");
+  const count = Number(input.value);
+  if (!Number.isInteger(count) || count <= 0) {
+    alert("请输入大于 0 的整数数量");
+    input.focus();
+    input.select();
+    return;
+  }
+  const submitBtn = document.getElementById("cpa-supplement-submit");
+  const toolbarBtn = document.getElementById("cpa-supplement-btn");
+  submitBtn.disabled = true;
+  submitBtn.classList.add("loading");
+  submitBtn.textContent = "补充中";
+  toolbarBtn.disabled = true;
+  toolbarBtn.classList.add("loading");
+  toolbarBtn.textContent = "补充执行中";
+  try {
+    const data = await api("api/cpa/supplement", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ count }),
+    });
+    await refreshAll();
+    closeCpaSupplementModal();
+    const summary = `补充完成：请求 ${data.requested}，符合条件 ${data.eligible}，实际补充 ${data.supplemented}`;
+    if (data.ok && data.warnings?.length) {
+      showToast(`${summary}；提示：${data.warnings[0]}`, "warning", 6500);
+    } else if (data.ok) {
+      showToast(summary);
+    } else {
+      showToast(`${summary}；错误：${data.error || data.errors?.[0] || "CPA 补充失败"}`, "error", 6500);
+    }
+  } catch (error) {
+    showToast(error.message, "error", 4500);
+  } finally {
+    if (submitBtn.isConnected) {
+      submitBtn.disabled = false;
+      submitBtn.classList.remove("loading");
+      submitBtn.textContent = "开始补充";
+    }
+    if (toolbarBtn.isConnected) {
+      toolbarBtn.disabled = false;
+      toolbarBtn.classList.remove("loading");
+      toolbarBtn.textContent = "补充凭证";
+    }
+  }
+}
+
 async function loadCpaConfig() {
   const data = await api("api/cpa/config");
   document.getElementById("cpa-enabled").checked = Boolean(data.enabled);
@@ -1387,10 +1457,13 @@ async function loadCpaStatus() {
   `;
   const inspectBtn = document.getElementById("cpa-inspect-btn");
   const reclaimBtn = document.getElementById("cpa-reclaim-btn");
+  const supplementBtn = document.getElementById("cpa-supplement-btn");
   inspectBtn.disabled = running;
   inspectBtn.textContent = running ? "巡查执行中" : "立即巡查";
   reclaimBtn.disabled = running;
   reclaimBtn.textContent = running ? "取回执行中" : "取回凭证";
+  supplementBtn.disabled = running;
+  supplementBtn.textContent = running ? "补充执行中" : "补充凭证";
 }
 
 async function runCpaReclaimAll() {
@@ -1582,6 +1655,9 @@ window.reassignAllUserAgents = reassignAllUserAgents;
 window.saveCpaConfig = saveCpaConfig;
 window.runCpaReclaimAll = runCpaReclaimAll;
 window.runCpaInspectOnce = runCpaInspectOnce;
+window.openCpaSupplementModal = openCpaSupplementModal;
+window.closeCpaSupplementModal = closeCpaSupplementModal;
+window.submitCpaSupplement = submitCpaSupplement;
 window.reloadCpaLog = reloadCpaLog;
 window.downloadCpaLog = downloadCpaLog;
 window.clearCpaLog = clearCpaLog;
@@ -1620,5 +1696,9 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape" && !document.getElementById("backup-restore-modal").classList.contains("hidden")) {
     closeBackupRestoreModal();
+    return;
+  }
+  if (event.key === "Escape" && !document.getElementById("cpa-supplement-modal").classList.contains("hidden")) {
+    closeCpaSupplementModal();
   }
 });
