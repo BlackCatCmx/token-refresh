@@ -832,26 +832,36 @@ impl CpaManager {
         need: usize,
         remaining_active: &[CpaAuthEntry],
     ) -> Result<SupplementSummary> {
-        let candidates = self.collect_supplement_candidate_keys(remaining_active)?;
+        let candidates = self.collect_supplement_candidates(remaining_active)?;
         let mut summary = SupplementSummary {
-            eligible: candidates.len(),
+            eligible: count_supplement_candidate_accounts(&candidates),
             ..SupplementSummary::default()
         };
+        // Only lock an email after one local copy succeeds, so a broken duplicate
+        // does not block the next local copy for the same account.
+        let mut selected_emails = HashSet::new();
 
-        for local_key in candidates.into_iter().take(need) {
-            match self.supplement_to_cpa(client, &local_key).await {
+        for candidate in candidates {
+            if summary.done >= need {
+                break;
+            }
+            if selected_emails.contains(&candidate.email) {
+                continue;
+            }
+            match self.supplement_to_cpa(client, &candidate.key).await {
                 Ok(outcome) => {
                     summary.local_changed |= outcome.local_changed;
                     if outcome.done {
                         summary.done += 1;
-                        summary.names.push(local_key.clone());
+                        summary.names.push(candidate.key.clone());
+                        selected_emails.insert(candidate.email);
                     }
                     if let Some(message) = outcome.message {
                         summary.errors.push(message);
                     }
                 }
                 Err(err) => {
-                    let message = format!("补号失败 {}: {err:#}", local_key);
+                    let message = format!("补号失败 {}: {err:#}", candidate.key);
                     self.log_best_effort(format!("[ERROR] {message}"));
                     summary.errors.push(message);
                 }
@@ -861,13 +871,13 @@ impl CpaManager {
         Ok(summary)
     }
 
-    fn collect_supplement_candidate_keys(
+    fn collect_supplement_candidates(
         &self,
         remaining_active: &[CpaAuthEntry],
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<SupplementCandidate>> {
         let entries = self.store.scan_zone(CredentialZone::Normal)?;
         let statuses = self.status_store.all()?;
-        Ok(select_supplement_candidate_keys(
+        Ok(select_supplement_candidates(
             &entries,
             &statuses,
             remaining_active,
@@ -1020,6 +1030,12 @@ struct SupplementOutcome {
     message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SupplementCandidate {
+    key: String,
+    email: String,
+}
+
 enum MoveImportCommitOutcome {
     Success,
     Failed {
@@ -1149,12 +1165,12 @@ fn validate_credential_bytes(bytes: &[u8], source_label: &str) -> Result<CodexCr
     Ok(credential)
 }
 
-fn select_supplement_candidate_keys(
+fn select_supplement_candidates(
     entries: &[CredentialEntry],
     statuses: &BTreeMap<String, CredentialStatusRecord>,
     remaining_active: &[CpaAuthEntry],
-) -> Vec<String> {
-    let mut occupied_emails: HashSet<String> = remaining_active
+) -> Vec<SupplementCandidate> {
+    let occupied_emails: HashSet<String> = remaining_active
         .iter()
         .filter_map(|entry| normalize_email(entry.email.as_deref()))
         .collect();
@@ -1181,11 +1197,21 @@ fn select_supplement_candidate_keys(
         if occupied_emails.contains(&email) {
             continue;
         }
-        occupied_emails.insert(email);
-        selected.push(entry.key.clone());
+        selected.push(SupplementCandidate {
+            key: entry.key.clone(),
+            email,
+        });
     }
 
     selected
+}
+
+fn count_supplement_candidate_accounts(candidates: &[SupplementCandidate]) -> usize {
+    candidates
+        .iter()
+        .map(|candidate| candidate.email.as_str())
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 fn normalize_email(value: Option<&str>) -> Option<String> {
@@ -1425,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn supplement_candidates_skip_exhausted_duplicates_and_invalid_entries() {
+    fn supplement_candidates_keep_same_email_fallbacks_and_count_unique_accounts() {
         let entries = vec![
             make_entry(
                 "available-a.json",
@@ -1471,15 +1497,26 @@ mod tests {
             next_retry_after: None,
         }];
 
-        let selected = select_supplement_candidate_keys(&entries, &statuses, &remaining_active);
+        let selected = select_supplement_candidates(&entries, &statuses, &remaining_active);
 
         assert_eq!(
             selected,
             vec![
-                "available-a.json".to_string(),
-                "available-b.json".to_string()
+                SupplementCandidate {
+                    key: "available-a.json".to_string(),
+                    email: "available-a@example.com".to_string(),
+                },
+                SupplementCandidate {
+                    key: "duplicate-a.json".to_string(),
+                    email: "available-a@example.com".to_string(),
+                },
+                SupplementCandidate {
+                    key: "available-b.json".to_string(),
+                    email: "available-b@example.com".to_string(),
+                },
             ]
         );
+        assert_eq!(count_supplement_candidate_accounts(&selected), 2);
     }
 
     fn make_entry(key: &str, email: Option<&str>, refresh_token: Option<&str>) -> CredentialEntry {
