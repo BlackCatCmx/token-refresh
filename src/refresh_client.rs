@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -270,15 +271,35 @@ fn proxy_route_label(proxy_host: Option<&str>) -> String {
 }
 
 fn classify_transport_error(error: reqwest::Error, proxy_host: Option<String>) -> RefreshFailure {
+    let reason = error.to_string();
     if error.is_timeout() {
-        return RefreshFailure::transient("network_timeout", error.to_string())
-            .with_proxy_host(proxy_host);
+        return RefreshFailure::transient("network_timeout", reason).with_proxy_host(proxy_host);
+    }
+    if proxy_host.is_some() && is_socks_transport_error(&error) {
+        return RefreshFailure::transient("socks_proxy_error", reason).with_proxy_host(proxy_host);
     }
     if error.is_connect() {
-        return RefreshFailure::transient("network_connect_failed", error.to_string())
+        return RefreshFailure::transient("network_connect_failed", reason)
             .with_proxy_host(proxy_host);
     }
-    RefreshFailure::transient("network_error", error.to_string()).with_proxy_host(proxy_host)
+    RefreshFailure::transient("network_error", reason).with_proxy_host(proxy_host)
+}
+
+fn is_socks_transport_error(error: &reqwest::Error) -> bool {
+    let mut current: &(dyn StdError + 'static) = error;
+    loop {
+        if is_socks_error_text(&current.to_string()) {
+            return true;
+        }
+        let Some(source) = current.source() else {
+            return false;
+        };
+        current = source;
+    }
+}
+
+fn is_socks_error_text(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("socks")
 }
 
 fn classify_http_error(status: u16, body: &str) -> RefreshFailure {
@@ -323,6 +344,7 @@ mod tests {
     use std::env;
     use std::sync::{Mutex as StdMutex, OnceLock};
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::time::timeout;
 
@@ -426,5 +448,37 @@ mod tests {
         let proxied = RefreshFailure::transient("code", "reason")
             .with_proxy_host(Some("127.0.0.1:10808".to_string()));
         assert_eq!(proxied.proxy_label.as_deref(), Some("127.0.0.1:10808"));
+    }
+
+    #[test]
+    fn socks_error_text_matches_only_socks_messages() {
+        assert!(is_socks_error_text("SOCKS server rejected hostname"));
+        assert!(is_socks_error_text("proxy socks protocol error"));
+        assert!(!is_socks_error_text("tls handshake failed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn classify_transport_error_detects_reqwest_socks_source_chain() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_host = listener.local_addr().unwrap().to_string();
+        let proxy_url = format!("socks5h://{proxy_host}");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .proxy(reqwest::Proxy::all(&proxy_url).unwrap())
+            .build()
+            .unwrap();
+
+        let request = async move { client.get("https://example.invalid/").send().await };
+        let fake_proxy = async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 3];
+            let _ = stream.read(&mut greeting).await.unwrap();
+            stream.write_all(&[0x04, 0x00]).await.unwrap();
+        };
+        let (result, _) = tokio::join!(request, fake_proxy);
+        let error = result.unwrap_err();
+        let failure = classify_transport_error(error, Some(proxy_host));
+
+        assert_eq!(failure.code, "socks_proxy_error");
     }
 }

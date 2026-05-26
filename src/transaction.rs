@@ -544,7 +544,7 @@ fn should_fallback_to_next_proxy(error: &RefreshFailure) -> bool {
     error.proxy_host.is_some()
         && matches!(
             error.code.as_str(),
-            "network_connect_failed" | "network_timeout"
+            "network_connect_failed" | "network_timeout" | "socks_proxy_error"
         )
 }
 
@@ -562,10 +562,11 @@ fn build_proxy_attempt_sequence(
     primary_start_index: Option<usize>,
 ) -> Result<Vec<ProxyAttempt>> {
     let mut attempts = Vec::new();
+    // Each configured proxy tries remote DNS first, then local DNS for proxies without SOCKS5H support.
     match mode {
         "fixed" => {
             if let Some(proxy) = primary_proxies.first() {
-                attempts.push(ProxyAttempt::Primary(proxy.clone()));
+                push_proxy_attempt_pair(&mut attempts, proxy, ProxyAttempt::Primary)?;
             }
         }
         "round_robin" => {
@@ -573,17 +574,32 @@ fn build_proxy_attempt_sequence(
                 let start_index =
                     primary_start_index.expect("invariant: round_robin primary index is reserved");
                 for offset in 0..primary_proxies.len() {
-                    let proxy =
-                        primary_proxies[(start_index + offset) % primary_proxies.len()].clone();
-                    attempts.push(ProxyAttempt::Primary(proxy));
+                    let proxy = &primary_proxies[(start_index + offset) % primary_proxies.len()];
+                    push_proxy_attempt_pair(&mut attempts, proxy, ProxyAttempt::Primary)?;
                 }
             }
         }
         other => anyhow::bail!("unsupported proxy mode: {other}"),
     }
-    attempts.extend(backup_proxies.iter().cloned().map(ProxyAttempt::Backup));
+    for proxy in backup_proxies {
+        push_proxy_attempt_pair(&mut attempts, proxy, ProxyAttempt::Backup)?;
+    }
     attempts.push(ProxyAttempt::Direct);
     Ok(attempts)
+}
+
+fn push_proxy_attempt_pair(
+    attempts: &mut Vec<ProxyAttempt>,
+    proxy: &str,
+    wrap: fn(String) -> ProxyAttempt,
+) -> Result<()> {
+    let remote_proxy = crate::proxy::to_remote_dns_proxy(proxy)?;
+    attempts.push(wrap(remote_proxy.clone()));
+    let local_proxy = crate::proxy::to_local_dns_proxy(&remote_proxy)?;
+    if local_proxy != remote_proxy {
+        attempts.push(wrap(local_proxy));
+    }
+    Ok(())
 }
 
 fn log_proxy_fallback_transition(
@@ -595,47 +611,83 @@ fn log_proxy_fallback_transition(
 ) -> Result<()> {
     let failed_proxy = proxy_host.unwrap_or("-");
     let next_proxy = proxy_attempt_route_label(next);
-    let message = match (current, next) {
-        (ProxyAttempt::Primary(_), ProxyAttempt::Primary(_)) => {
-            format!(
-                "主代理请求失败，准备切换下一条主代理 (key={}, failed_proxy={}, next_proxy={})",
-                key, failed_proxy, next_proxy
-            )
-        }
-        (ProxyAttempt::Primary(_), ProxyAttempt::Backup(_)) => {
-            format!(
-                "主代理请求失败，准备切换到备用代理 (key={}, failed_proxy={}, next_proxy={})",
-                key, failed_proxy, next_proxy
-            )
-        }
-        (ProxyAttempt::Primary(_), ProxyAttempt::Direct) => {
-            format!(
-                "主代理请求失败，准备回退到直连 (key={}, failed_proxy={}, next=direct)",
-                key, failed_proxy
-            )
-        }
-        (ProxyAttempt::Backup(_), ProxyAttempt::Backup(_)) => {
-            format!(
-                "备用代理请求失败，准备切换下一条备用代理 (key={}, failed_proxy={}, next_proxy={})",
-                key, failed_proxy, next_proxy
-            )
-        }
-        (ProxyAttempt::Backup(_), ProxyAttempt::Direct) => {
-            format!(
-                "备用代理请求失败，准备回退到直连 (key={}, failed_proxy={}, next=direct)",
-                key, failed_proxy
-            )
-        }
-        (ProxyAttempt::Direct, _) | (ProxyAttempt::Backup(_), ProxyAttempt::Primary(_)) => {
-            anyhow::bail!(
-                "unexpected proxy fallback transition: {:?} -> {:?}",
-                current,
-                next
-            )
+    let message = if is_remote_to_local_dns_fallback(current, next) {
+        format!(
+            "SOCKS5H 代理请求失败，准备使用同一代理的 SOCKS5 模式 (key={}, failed_proxy={}, next_proxy={})",
+            key, failed_proxy, next_proxy
+        )
+    } else {
+        match (current, next) {
+            (ProxyAttempt::Primary(_), ProxyAttempt::Primary(_)) => {
+                format!(
+                    "主代理请求失败，准备切换下一条主代理 (key={}, failed_proxy={}, next_proxy={})",
+                    key, failed_proxy, next_proxy
+                )
+            }
+            (ProxyAttempt::Primary(_), ProxyAttempt::Backup(_)) => {
+                format!(
+                    "主代理请求失败，准备切换到备用代理 (key={}, failed_proxy={}, next_proxy={})",
+                    key, failed_proxy, next_proxy
+                )
+            }
+            (ProxyAttempt::Primary(_), ProxyAttempt::Direct) => {
+                format!(
+                    "主代理请求失败，准备回退到直连 (key={}, failed_proxy={}, next=direct)",
+                    key, failed_proxy
+                )
+            }
+            (ProxyAttempt::Backup(_), ProxyAttempt::Backup(_)) => {
+                format!(
+                    "备用代理请求失败，准备切换下一条备用代理 (key={}, failed_proxy={}, next_proxy={})",
+                    key, failed_proxy, next_proxy
+                )
+            }
+            (ProxyAttempt::Backup(_), ProxyAttempt::Direct) => {
+                format!(
+                    "备用代理请求失败，准备回退到直连 (key={}, failed_proxy={}, next=direct)",
+                    key, failed_proxy
+                )
+            }
+            (ProxyAttempt::Direct, _) | (ProxyAttempt::Backup(_), ProxyAttempt::Primary(_)) => {
+                anyhow::bail!(
+                    "unexpected proxy fallback transition: {:?} -> {:?}",
+                    current,
+                    next
+                )
+            }
         }
     };
     runtime_warn_best_effort(logger, message);
     Ok(())
+}
+
+fn is_remote_to_local_dns_fallback(current: &ProxyAttempt, next: &ProxyAttempt) -> bool {
+    let Some(current_proxy) = proxy_attempt_proxy(current) else {
+        return false;
+    };
+    let Some(next_proxy) = proxy_attempt_proxy(next) else {
+        return false;
+    };
+    let Ok(current_url) = reqwest::Url::parse(current_proxy) else {
+        return false;
+    };
+    let Ok(next_url) = reqwest::Url::parse(next_proxy) else {
+        return false;
+    };
+
+    current_url.scheme() == "socks5h"
+        && next_url.scheme() == "socks5"
+        && current_url.host_str() == next_url.host_str()
+        && current_url.port() == next_url.port()
+        && current_url.username() == next_url.username()
+        && current_url.password() == next_url.password()
+}
+
+fn proxy_attempt_proxy(attempt: &ProxyAttempt) -> Option<&str> {
+    match attempt {
+        ProxyAttempt::Primary(proxy) | ProxyAttempt::Backup(proxy) => Some(proxy),
+        ProxyAttempt::Direct => None,
+    }
 }
 
 fn proxy_attempt_route_label(attempt: &ProxyAttempt) -> String {
@@ -871,8 +923,11 @@ mod tests {
         assert_eq!(
             attempts,
             vec![
+                ProxyAttempt::Primary("socks5h://127.0.0.1:10808".to_string()),
                 ProxyAttempt::Primary("socks5://127.0.0.1:10808".to_string()),
+                ProxyAttempt::Backup("socks5h://127.0.0.1:10818".to_string()),
                 ProxyAttempt::Backup("socks5://127.0.0.1:10818".to_string()),
+                ProxyAttempt::Backup("socks5h://127.0.0.1:10819".to_string()),
                 ProxyAttempt::Backup("socks5://127.0.0.1:10819".to_string()),
                 ProxyAttempt::Direct,
             ]
@@ -896,9 +951,13 @@ mod tests {
         assert_eq!(
             attempts,
             vec![
+                ProxyAttempt::Primary("socks5h://127.0.0.1:10809".to_string()),
                 ProxyAttempt::Primary("socks5://127.0.0.1:10809".to_string()),
+                ProxyAttempt::Primary("socks5h://127.0.0.1:10810".to_string()),
                 ProxyAttempt::Primary("socks5://127.0.0.1:10810".to_string()),
+                ProxyAttempt::Primary("socks5h://127.0.0.1:10808".to_string()),
                 ProxyAttempt::Primary("socks5://127.0.0.1:10808".to_string()),
+                ProxyAttempt::Backup("socks5h://127.0.0.1:10818".to_string()),
                 ProxyAttempt::Backup("socks5://127.0.0.1:10818".to_string()),
                 ProxyAttempt::Direct,
             ]
@@ -921,7 +980,9 @@ mod tests {
         assert_eq!(
             attempts,
             vec![
+                ProxyAttempt::Backup("socks5h://127.0.0.1:10818".to_string()),
                 ProxyAttempt::Backup("socks5://127.0.0.1:10818".to_string()),
+                ProxyAttempt::Backup("socks5h://127.0.0.1:10819".to_string()),
                 ProxyAttempt::Backup("socks5://127.0.0.1:10819".to_string()),
                 ProxyAttempt::Direct,
             ]
@@ -946,6 +1007,22 @@ mod tests {
     #[test]
     fn should_not_fallback_to_next_proxy_when_direct_times_out() {
         let error = RefreshFailure::transient("network_timeout", "timeout").with_proxy_host(None);
+
+        assert!(!should_fallback_to_next_proxy(&error));
+    }
+
+    #[test]
+    fn should_fallback_to_next_proxy_when_proxy_returns_socks_error() {
+        let error = RefreshFailure::transient("socks_proxy_error", "socks protocol error")
+            .with_proxy_host(Some("127.0.0.1:10808".to_string()));
+
+        assert!(should_fallback_to_next_proxy(&error));
+    }
+
+    #[test]
+    fn should_not_fallback_to_next_proxy_when_proxy_returns_generic_network_error() {
+        let error = RefreshFailure::transient("network_error", "tls handshake failed")
+            .with_proxy_host(Some("127.0.0.1:10808".to_string()));
 
         assert!(!should_fallback_to_next_proxy(&error));
     }
@@ -1007,5 +1084,25 @@ mod tests {
         assert!(content.contains("主代理请求失败，准备切换到备用代理"));
         assert!(content.contains("failed_proxy=127.0.0.1:10808"));
         assert!(content.contains("next_proxy=127.0.0.1:10818"));
+    }
+
+    #[test]
+    fn log_proxy_fallback_transition_logs_socks5h_to_socks5() {
+        let temp = tempfile::tempdir().unwrap();
+        let logger = LogManager::new(temp.path(), 4096, "info").unwrap();
+
+        log_proxy_fallback_transition(
+            &logger,
+            "demo.json",
+            &ProxyAttempt::Primary("socks5h://127.0.0.1:10808".to_string()),
+            &ProxyAttempt::Primary("socks5://127.0.0.1:10808".to_string()),
+            Some("127.0.0.1:10808"),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(temp.path().join("logs/runtime.log")).unwrap();
+        assert!(content.contains("SOCKS5H 代理请求失败，准备使用同一代理的 SOCKS5 模式"));
+        assert!(content.contains("failed_proxy=127.0.0.1:10808"));
+        assert!(content.contains("next_proxy=127.0.0.1:10808"));
     }
 }

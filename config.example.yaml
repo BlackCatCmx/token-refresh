@@ -35,7 +35,7 @@ request_identity:
 proxy:
   mode: "fixed"
   list: |
-    socks5://127.0.0.1:10808
+    socks5h://127.0.0.1:10808
   backup_list: ""
 
 credential_management:
