@@ -403,9 +403,9 @@ impl SchedulerRuntime {
             }
             let wake_requested = self
                 .wait_inter_refresh_delay(
-                    &config,
                     next_check_at,
                     queued_next_key.clone().or_else(|| latest_plan.next_key()),
+                    latest_plan.future_due.as_slice(),
                 )
                 .await?;
             {
@@ -433,21 +433,25 @@ impl SchedulerRuntime {
 
     async fn wait_inter_refresh_delay(
         &self,
-        config: &crate::config::AppConfig,
         delay_until: DateTime<Utc>,
         next_key: Option<String>,
+        future_due: &[FutureDueEntry],
     ) -> Result<bool> {
+        let mut next_future_index = first_future_due_after(future_due, Utc::now());
         loop {
             let now = Utc::now();
             if now >= delay_until {
                 return Ok(false);
             }
-            let plan = self.collect_schedule_plan(config, now).await?;
-            let sleep_until = plan
-                .next_due_at
-                .as_ref()
-                .filter(|value| **value < delay_until)
-                .cloned()
+            while next_future_index < future_due.len()
+                && future_due[next_future_index].due_at <= now
+            {
+                next_future_index += 1;
+            }
+            let sleep_until = future_due
+                .get(next_future_index)
+                .map(|entry| entry.due_at)
+                .filter(|value| *value < delay_until)
                 .unwrap_or(delay_until);
             let sleep_duration = (sleep_until - now)
                 .to_std()
@@ -466,10 +470,16 @@ impl SchedulerRuntime {
             if now >= delay_until {
                 return Ok(false);
             }
-            let refreshed_plan = self.collect_schedule_plan(config, now).await?;
+            while next_future_index < future_due.len()
+                && future_due[next_future_index].due_at <= now
+            {
+                next_future_index += 1;
+            }
             let mut status = self.status.write().await;
-            status.next_key = next_key.clone().or_else(|| refreshed_plan.next_key());
-            status.next_due_at = refreshed_plan.next_due_at_rfc3339();
+            status.next_key = next_key.clone();
+            status.next_due_at = future_due
+                .get(next_future_index)
+                .map(|entry| entry.due_at.to_rfc3339());
         }
     }
 
@@ -629,6 +639,13 @@ struct SchedulePlan {
     due_keys: Vec<String>,
     next_future_key: Option<String>,
     next_due_at: Option<DateTime<Utc>>,
+    future_due: Vec<FutureDueEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FutureDueEntry {
+    key: String,
+    due_at: DateTime<Utc>,
 }
 
 impl SchedulePlan {
@@ -653,7 +670,7 @@ fn collect_schedule_plan(
 ) -> Result<SchedulePlan> {
     let entries = store.scan_zone(CredentialZone::Normal)?;
     let mut due_keys = Vec::new();
-    let mut next_future: Option<(String, DateTime<Utc>)> = None;
+    let mut future_due = Vec::new();
     for entry in entries {
         let key = entry.key.clone();
         let due = if let Some(credential) = entry.credential.as_ref() {
@@ -671,27 +688,32 @@ fn collect_schedule_plan(
             due_keys.push(key);
             continue;
         }
-        let replace_current = match next_future.as_ref() {
-            Some((existing_key, existing_time)) => {
-                scheduled_time < *existing_time
-                    || (scheduled_time == *existing_time && key < *existing_key)
-            }
-            None => true,
-        };
-        if replace_current {
-            next_future = Some((key, scheduled_time));
-        }
+        future_due.push(FutureDueEntry {
+            key,
+            due_at: scheduled_time,
+        });
     }
     due_keys.sort();
-    let (next_future_key, next_due_at) = match next_future {
-        Some((key, due_at)) => (Some(key), Some(due_at)),
-        None => (None, None),
-    };
+    future_due.sort_by(|left, right| {
+        left.due_at
+            .cmp(&right.due_at)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    let next_future_key = future_due.first().map(|entry| entry.key.clone());
+    let next_due_at = future_due.first().map(|entry| entry.due_at);
     Ok(SchedulePlan {
         due_keys,
         next_future_key,
         next_due_at,
+        future_due,
     })
+}
+
+fn first_future_due_after(future_due: &[FutureDueEntry], now: DateTime<Utc>) -> usize {
+    future_due
+        .iter()
+        .position(|entry| entry.due_at > now)
+        .unwrap_or(future_due.len())
 }
 
 fn compute_idle_sleep(
