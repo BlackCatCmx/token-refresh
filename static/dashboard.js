@@ -107,6 +107,8 @@ async function loadScheduler() {
     <span>${escapeHtml(data.scheduled_credential_count ?? "—")}</span>
     <span class="status-label">当前刷新账号</span>
     <span>${escapeHtml(data.current_key || "无")}</span>
+    <span class="status-label">下一预计刷新账号</span>
+    <span>${escapeHtml(data.next_key || "无")}</span>
     <span class="status-label">下一次调度检查</span>
     <span>${escapeHtml(formatSchedulerNextCheck(data))}</span>
     <span class="status-label">下一个未到期账号时间</span>
