@@ -334,7 +334,7 @@ impl BackupCoordinator {
 
     pub async fn list_snapshots(&self) -> Result<SnapshotListResult> {
         let started_at = Instant::now();
-        let rss_before_kb = memdiag::sample().rss_kb;
+        let rss_before_kb = sample_rss_for_memory_log();
         let config = self.inner.config_manager.effective_config().await;
         self.sync_cached_s3_clients(&config.backup).await;
         let backup = ensure_backup_ready(&config.backup)?;
@@ -350,10 +350,12 @@ impl BackupCoordinator {
                     let _ = self.inner.logger.runtime(
                         "error",
                         format!(
-                            "backup snapshots client init failed remote={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                            "backup snapshots client init failed remote={}{} elapsed_ms={} err={err:#}",
                             remote_name,
-                            format_optional_u64(rss_before_kb),
-                            format_optional_u64(memdiag::sample().rss_kb),
+                            format_rss_delta_memory_suffix(
+                                rss_before_kb,
+                                sample_rss_for_memory_log(),
+                            ),
                             started_at.elapsed().as_millis(),
                         ),
                     );
@@ -374,12 +376,14 @@ impl BackupCoordinator {
                     let _ = self.inner.logger.runtime(
                         "info",
                         format!(
-                            "backup snapshots listed remote={} count={} cache={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                            "backup snapshots listed remote={} count={} cache={}{} elapsed_ms={}",
                             remote_name,
                             remote_count,
                             cache_status.as_str(),
-                            format_optional_u64(rss_before_kb),
-                            format_optional_u64(memdiag::sample().rss_kb),
+                            format_rss_delta_memory_suffix(
+                                rss_before_kb,
+                                sample_rss_for_memory_log(),
+                            ),
                             started_at.elapsed().as_millis(),
                         ),
                     );
@@ -389,11 +393,13 @@ impl BackupCoordinator {
                     let _ = self.inner.logger.runtime(
                         "error",
                         format!(
-                            "backup snapshots listing failed remote={} cache={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                            "backup snapshots listing failed remote={} cache={}{} elapsed_ms={} err={err:#}",
                             remote_name,
                             cache_status.as_str(),
-                            format_optional_u64(rss_before_kb),
-                            format_optional_u64(memdiag::sample().rss_kb),
+                            format_rss_delta_memory_suffix(
+                                rss_before_kb,
+                                sample_rss_for_memory_log(),
+                            ),
                             started_at.elapsed().as_millis(),
                         ),
                     );
@@ -401,18 +407,17 @@ impl BackupCoordinator {
             }
         }
         items.sort_by(compare_remote_snapshots_desc);
-        let rss_after_kb = memdiag::sample().rss_kb;
         if should_fail_snapshot_listing(success_count, warnings.len()) {
             bail!("所有备份端读取失败：{}", warnings.join(" | "));
         }
+        let rss_after_kb = sample_rss_for_memory_log();
         let _ = self.inner.logger.runtime(
             "info",
             format!(
-                "backup snapshots merged count={} warnings={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                "backup snapshots merged count={} warnings={}{} elapsed_ms={}",
                 items.len(),
                 warnings.len(),
-                format_optional_u64(rss_before_kb),
-                format_optional_u64(rss_after_kb),
+                format_rss_delta_memory_suffix(rss_before_kb, rss_after_kb),
                 started_at.elapsed().as_millis(),
             ),
         );
@@ -573,27 +578,15 @@ impl BackupCoordinator {
         manual_remote_name: Option<&str>,
     ) -> Result<RemoteSnapshot> {
         let started_at = Instant::now();
-        let mem_before = memdiag::sample_full();
+        let mem_before = sample_full_for_memory_log();
         let dirty_since = *self.inner.dirty_since.read().await;
         let last_auto_backup_at = *self.inner.last_auto_backup_at.read().await;
         let _ = self.inner.logger.runtime(
             "info",
             format!(
-                "backup started trigger={} rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_kb={} cg_file_kb={} cg_shmem_kb={} cg_file_mapped_kb={} cg_active_file_kb={} cg_inactive_file_kb={} cg_pgfault={} cg_pgmajfault={} cg_workingset_refault_file={} cg_workingset_activate_file={} dirty_since={} last_auto_backup_at={}",
+                "backup started trigger={}{} dirty_since={} last_auto_backup_at={}",
                 trigger.as_str(),
-                mem_before.fmt_rss(),
-                mem_before.fmt_cg(),
-                mem_before.fmt_gap(),
-                mem_before.fmt_anon(),
-                mem_before.fmt_file(),
-                mem_before.fmt_shmem(),
-                mem_before.fmt_file_mapped(),
-                mem_before.fmt_active_file(),
-                mem_before.fmt_inactive_file(),
-                mem_before.fmt_pgfault(),
-                mem_before.fmt_pgmajfault(),
-                mem_before.fmt_workingset_refault_file(),
-                mem_before.fmt_workingset_activate_file(),
+                format_backup_start_memory_suffix(&mem_before),
                 format_optional_datetime(dirty_since),
                 format_optional_datetime(last_auto_backup_at),
             ),
@@ -653,7 +646,7 @@ impl BackupCoordinator {
                 .context("failed to inspect temporary snapshot archive")?
                 .len();
             archive_size_bytes = Some(archive_size);
-            mem_after_archive = memdiag::sample_full();
+            mem_after_archive = sample_full_for_memory_log();
             build_elapsed_ms = Some(started_at.elapsed().as_millis());
 
             for (remote_name, remote) in backup_targets {
@@ -709,13 +702,13 @@ impl BackupCoordinator {
                     client
                         .put_object_stream(&snapshot_key, &mut upload_file)
                         .await?;
-                    mem_after_upload = memdiag::sample_anon_file();
+                    mem_after_upload = sample_anon_file_for_memory_log();
                     upload_elapsed_ms = Some(upload_started_at.elapsed().as_millis());
 
                     let list_started_at = Instant::now();
                     let snapshots = client.list_snapshots().await?;
                     let listed_count = snapshots.len();
-                    mem_after_list = memdiag::sample_anon_file();
+                    mem_after_list = sample_anon_file_for_memory_log();
                     list_elapsed_ms = Some(list_started_at.elapsed().as_millis());
 
                     let delete_started_at = Instant::now();
@@ -724,7 +717,7 @@ impl BackupCoordinator {
                         client.delete_object(&snapshot.key).await?;
                         deleted_count += 1;
                     }
-                    mem_after_delete = memdiag::sample_anon_file();
+                    mem_after_delete = sample_anon_file_for_memory_log();
                     delete_elapsed_ms = Some(delete_started_at.elapsed().as_millis());
                     trim_summary = SnapshotTrimSummary {
                         listed_count,
@@ -732,7 +725,7 @@ impl BackupCoordinator {
                     };
 
                     drop(upload_file);
-                    mem_after_drop = memdiag::sample_full();
+                    mem_after_drop = sample_full_for_memory_log();
                     self.inner.state_store.set_latest(
                         Some(created_at.to_rfc3339()),
                         Some(snapshot_key.clone()),
@@ -808,7 +801,7 @@ impl BackupCoordinator {
         }
         .await;
 
-        let mem_final = memdiag::sample_full();
+        let mem_final = sample_full_for_memory_log();
         let cache_status = cache_status
             .map(|value| value.as_str())
             .unwrap_or("unknown");
@@ -838,67 +831,69 @@ impl BackupCoordinator {
                         total_elapsed_ms,
                     ),
                 );
-                let _ = self.inner.logger.runtime(
-                    "info",
-                    format!(
-                        "backup metrics trigger={} rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_before_kb={} cg_file_before_kb={} cg_shmem_before_kb={} cg_file_mapped_before_kb={} cg_active_file_before_kb={} cg_inactive_file_before_kb={} rss_after_archive_kb={} cg_after_archive_kb={} gap_after_archive_kb={} cg_anon_after_archive_kb={} cg_file_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} gap_after_upload_kb={} cg_anon_after_upload_kb={} cg_file_after_upload_kb={} rss_after_list_kb={} cg_after_list_kb={} gap_after_list_kb={} cg_anon_after_list_kb={} cg_file_after_list_kb={} rss_after_delete_kb={} cg_after_delete_kb={} gap_after_delete_kb={} cg_anon_after_delete_kb={} cg_file_after_delete_kb={} rss_after_drop_kb={} cg_after_drop_kb={} gap_after_drop_kb={} cg_anon_drop_kb={} cg_file_drop_kb={} cg_shmem_drop_kb={} cg_file_mapped_drop_kb={} cg_active_file_drop_kb={} cg_inactive_file_drop_kb={} pgfault_delta={} pgmajfault_delta={} workingset_refault_file_delta={} workingset_activate_file_delta={}",
-                        trigger.as_str(),
-                        mem_before.fmt_rss(),
-                        mem_before.fmt_cg(),
-                        mem_before.fmt_gap(),
-                        mem_before.fmt_anon(),
-                        mem_before.fmt_file(),
-                        mem_before.fmt_shmem(),
-                        mem_before.fmt_file_mapped(),
-                        mem_before.fmt_active_file(),
-                        mem_before.fmt_inactive_file(),
-                        mem_after_archive.fmt_rss(),
-                        mem_after_archive.fmt_cg(),
-                        mem_after_archive.fmt_gap(),
-                        mem_after_archive.fmt_anon(),
-                        mem_after_archive.fmt_file(),
-                        mem_after_upload.fmt_rss(),
-                        mem_after_upload.fmt_cg(),
-                        mem_after_upload.fmt_gap(),
-                        mem_after_upload.fmt_anon(),
-                        mem_after_upload.fmt_file(),
-                        mem_after_list.fmt_rss(),
-                        mem_after_list.fmt_cg(),
-                        mem_after_list.fmt_gap(),
-                        mem_after_list.fmt_anon(),
-                        mem_after_list.fmt_file(),
-                        mem_after_delete.fmt_rss(),
-                        mem_after_delete.fmt_cg(),
-                        mem_after_delete.fmt_gap(),
-                        mem_after_delete.fmt_anon(),
-                        mem_after_delete.fmt_file(),
-                        mem_after_drop.fmt_rss(),
-                        mem_after_drop.fmt_cg(),
-                        mem_after_drop.fmt_gap(),
-                        mem_after_drop.fmt_anon(),
-                        mem_after_drop.fmt_file(),
-                        mem_after_drop.fmt_shmem(),
-                        mem_after_drop.fmt_file_mapped(),
-                        mem_after_drop.fmt_active_file(),
-                        mem_after_drop.fmt_inactive_file(),
-                        memdiag::format_counter_delta(memdiag::counter_delta(
-                            mem_before.cg_pgfault,
-                            mem_after_drop.cg_pgfault,
-                        )),
-                        memdiag::format_counter_delta(memdiag::counter_delta(
-                            mem_before.cg_pgmajfault,
-                            mem_after_drop.cg_pgmajfault,
-                        )),
-                        memdiag::format_counter_delta(memdiag::counter_delta(
-                            mem_before.cg_workingset_refault_file,
-                            mem_after_drop.cg_workingset_refault_file,
-                        )),
-                        memdiag::format_counter_delta(memdiag::counter_delta(
-                            mem_before.cg_workingset_activate_file,
-                            mem_after_drop.cg_workingset_activate_file,
-                        )),
-                    ),
-                );
+                if memdiag::memory_diagnostic_logs_enabled() {
+                    let _ = self.inner.logger.runtime(
+                        "info",
+                        format!(
+                            "backup metrics trigger={} rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_before_kb={} cg_file_before_kb={} cg_shmem_before_kb={} cg_file_mapped_before_kb={} cg_active_file_before_kb={} cg_inactive_file_before_kb={} rss_after_archive_kb={} cg_after_archive_kb={} gap_after_archive_kb={} cg_anon_after_archive_kb={} cg_file_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} gap_after_upload_kb={} cg_anon_after_upload_kb={} cg_file_after_upload_kb={} rss_after_list_kb={} cg_after_list_kb={} gap_after_list_kb={} cg_anon_after_list_kb={} cg_file_after_list_kb={} rss_after_delete_kb={} cg_after_delete_kb={} gap_after_delete_kb={} cg_anon_after_delete_kb={} cg_file_after_delete_kb={} rss_after_drop_kb={} cg_after_drop_kb={} gap_after_drop_kb={} cg_anon_drop_kb={} cg_file_drop_kb={} cg_shmem_drop_kb={} cg_file_mapped_drop_kb={} cg_active_file_drop_kb={} cg_inactive_file_drop_kb={} pgfault_delta={} pgmajfault_delta={} workingset_refault_file_delta={} workingset_activate_file_delta={}",
+                            trigger.as_str(),
+                            mem_before.fmt_rss(),
+                            mem_before.fmt_cg(),
+                            mem_before.fmt_gap(),
+                            mem_before.fmt_anon(),
+                            mem_before.fmt_file(),
+                            mem_before.fmt_shmem(),
+                            mem_before.fmt_file_mapped(),
+                            mem_before.fmt_active_file(),
+                            mem_before.fmt_inactive_file(),
+                            mem_after_archive.fmt_rss(),
+                            mem_after_archive.fmt_cg(),
+                            mem_after_archive.fmt_gap(),
+                            mem_after_archive.fmt_anon(),
+                            mem_after_archive.fmt_file(),
+                            mem_after_upload.fmt_rss(),
+                            mem_after_upload.fmt_cg(),
+                            mem_after_upload.fmt_gap(),
+                            mem_after_upload.fmt_anon(),
+                            mem_after_upload.fmt_file(),
+                            mem_after_list.fmt_rss(),
+                            mem_after_list.fmt_cg(),
+                            mem_after_list.fmt_gap(),
+                            mem_after_list.fmt_anon(),
+                            mem_after_list.fmt_file(),
+                            mem_after_delete.fmt_rss(),
+                            mem_after_delete.fmt_cg(),
+                            mem_after_delete.fmt_gap(),
+                            mem_after_delete.fmt_anon(),
+                            mem_after_delete.fmt_file(),
+                            mem_after_drop.fmt_rss(),
+                            mem_after_drop.fmt_cg(),
+                            mem_after_drop.fmt_gap(),
+                            mem_after_drop.fmt_anon(),
+                            mem_after_drop.fmt_file(),
+                            mem_after_drop.fmt_shmem(),
+                            mem_after_drop.fmt_file_mapped(),
+                            mem_after_drop.fmt_active_file(),
+                            mem_after_drop.fmt_inactive_file(),
+                            memdiag::format_counter_delta(memdiag::counter_delta(
+                                mem_before.cg_pgfault,
+                                mem_after_drop.cg_pgfault,
+                            )),
+                            memdiag::format_counter_delta(memdiag::counter_delta(
+                                mem_before.cg_pgmajfault,
+                                mem_after_drop.cg_pgmajfault,
+                            )),
+                            memdiag::format_counter_delta(memdiag::counter_delta(
+                                mem_before.cg_workingset_refault_file,
+                                mem_after_drop.cg_workingset_refault_file,
+                            )),
+                            memdiag::format_counter_delta(memdiag::counter_delta(
+                                mem_before.cg_workingset_activate_file,
+                                mem_after_drop.cg_workingset_activate_file,
+                            )),
+                        ),
+                    );
+                }
             }
             Err(err) => {
                 match trigger {
@@ -920,45 +915,17 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "error",
                     format!(
-                        "backup failed trigger={} remote={} key={} cache={} rss_before_kb={} cg_before_kb={} gap_before_kb={} rss_after_archive_kb={} cg_after_archive_kb={} gap_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} gap_after_upload_kb={} rss_final_kb={} cg_final_kb={} gap_final_kb={} cg_anon_final_kb={} cg_file_final_kb={} cg_shmem_final_kb={} cg_file_mapped_final_kb={} cg_active_file_final_kb={} cg_inactive_file_final_kb={} pgfault_delta={} pgmajfault_delta={} workingset_refault_file_delta={} workingset_activate_file_delta={} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={} err={err:#}",
+                        "backup failed trigger={} remote={} key={} cache={}{} archive_size_bytes={} snapshots_seen={} snapshots_deleted={} build_ms={} upload_ms={} list_ms={} delete_ms={} total_ms={} err={err:#}",
                         trigger.as_str(),
                         remote_name,
                         snapshot_key,
                         cache_status,
-                        mem_before.fmt_rss(),
-                        mem_before.fmt_cg(),
-                        mem_before.fmt_gap(),
-                        mem_after_archive.fmt_rss(),
-                        mem_after_archive.fmt_cg(),
-                        mem_after_archive.fmt_gap(),
-                        mem_after_upload.fmt_rss(),
-                        mem_after_upload.fmt_cg(),
-                        mem_after_upload.fmt_gap(),
-                        mem_final.fmt_rss(),
-                        mem_final.fmt_cg(),
-                        mem_final.fmt_gap(),
-                        mem_final.fmt_anon(),
-                        mem_final.fmt_file(),
-                        mem_final.fmt_shmem(),
-                        mem_final.fmt_file_mapped(),
-                        mem_final.fmt_active_file(),
-                        mem_final.fmt_inactive_file(),
-                        memdiag::format_counter_delta(memdiag::counter_delta(
-                            mem_before.cg_pgfault,
-                            mem_final.cg_pgfault,
-                        )),
-                        memdiag::format_counter_delta(memdiag::counter_delta(
-                            mem_before.cg_pgmajfault,
-                            mem_final.cg_pgmajfault,
-                        )),
-                        memdiag::format_counter_delta(memdiag::counter_delta(
-                            mem_before.cg_workingset_refault_file,
-                            mem_final.cg_workingset_refault_file,
-                        )),
-                        memdiag::format_counter_delta(memdiag::counter_delta(
-                            mem_before.cg_workingset_activate_file,
-                            mem_final.cg_workingset_activate_file,
-                        )),
+                        format_backup_failure_memory_suffix(
+                            &mem_before,
+                            &mem_after_archive,
+                            &mem_after_upload,
+                            &mem_final,
+                        ),
                         archive_size_bytes,
                         trim_summary.listed_count,
                         trim_summary.deleted_count,
@@ -981,7 +948,7 @@ impl BackupCoordinator {
         password: &str,
     ) -> Result<RestoreResult> {
         let started_at = Instant::now();
-        let rss_before_kb = memdiag::sample().rss_kb;
+        let rss_before_kb = sample_rss_for_memory_log();
         let scheduler_status = self.inner.scheduler.status().await;
         if scheduler_status.manual_running || scheduler_status.manual_pending {
             bail!("手动全量刷新正在执行中，请等待其完成后重试");
@@ -1031,16 +998,16 @@ impl BackupCoordinator {
             result
         }
         .await;
-        let rss_after_kb = memdiag::sample().rss_kb;
         let cache_status = cache_status
             .map(|value| value.as_str())
             .unwrap_or("unknown");
+        let rss_after_kb = sample_rss_for_memory_log();
         match &result {
             Ok(restored) => {
                 let _ = self.inner.logger.runtime(
                     "info",
                     format!(
-                        "backup restore completed remote={} snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} restored_normal_count={} restored_abnormal_count={} rss_before_kb={} rss_after_kb={} elapsed_ms={}",
+                        "backup restore completed remote={} snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} restored_normal_count={} restored_abnormal_count={}{} elapsed_ms={}",
                         remote_name,
                         snapshot_key,
                         cache_status,
@@ -1049,8 +1016,7 @@ impl BackupCoordinator {
                         format_optional_usize(manifest_abnormal_count),
                         restored.normal_count,
                         restored.abnormal_count,
-                        format_optional_u64(rss_before_kb),
-                        format_optional_u64(rss_after_kb),
+                        format_rss_delta_memory_suffix(rss_before_kb, rss_after_kb),
                         started_at.elapsed().as_millis(),
                     ),
                 );
@@ -1059,15 +1025,14 @@ impl BackupCoordinator {
                 let _ = self.inner.logger.runtime(
                     "error",
                     format!(
-                        "backup restore failed remote={} snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={} rss_before_kb={} rss_after_kb={} elapsed_ms={} err={err:#}",
+                        "backup restore failed remote={} snapshot_key={} cache={} downloaded_bytes={} manifest_normal_count={} manifest_abnormal_count={}{} elapsed_ms={} err={err:#}",
                         remote_name,
                         snapshot_key,
                         cache_status,
                         format_optional_usize(downloaded_bytes),
                         format_optional_usize(manifest_normal_count),
                         format_optional_usize(manifest_abnormal_count),
-                        format_optional_u64(rss_before_kb),
-                        format_optional_u64(rss_after_kb),
+                        format_rss_delta_memory_suffix(rss_before_kb, rss_after_kb),
                         started_at.elapsed().as_millis(),
                     ),
                 );
@@ -1382,6 +1347,111 @@ fn build_snapshot_key(
         date_path,
         timestamp,
         trigger.as_str()
+    )
+}
+
+fn sample_rss_for_memory_log() -> Option<u64> {
+    if memdiag::memory_diagnostic_logs_enabled() {
+        memdiag::sample().rss_kb
+    } else {
+        None
+    }
+}
+
+fn sample_full_for_memory_log() -> MemSample {
+    if memdiag::memory_diagnostic_logs_enabled() {
+        memdiag::sample_full()
+    } else {
+        MemSample::default()
+    }
+}
+
+fn sample_anon_file_for_memory_log() -> MemSample {
+    if memdiag::memory_diagnostic_logs_enabled() {
+        memdiag::sample_anon_file()
+    } else {
+        MemSample::default()
+    }
+}
+
+fn format_rss_delta_memory_suffix(before: Option<u64>, after: Option<u64>) -> String {
+    if !memdiag::memory_diagnostic_logs_enabled() {
+        return String::new();
+    }
+    format!(
+        " rss_before_kb={} rss_after_kb={}",
+        format_optional_u64(before),
+        format_optional_u64(after)
+    )
+}
+
+fn format_backup_start_memory_suffix(sample: &MemSample) -> String {
+    if !memdiag::memory_diagnostic_logs_enabled() {
+        return String::new();
+    }
+    format!(
+        " rss_before_kb={} cg_before_kb={} gap_before_kb={} cg_anon_kb={} cg_file_kb={} cg_shmem_kb={} cg_file_mapped_kb={} cg_active_file_kb={} cg_inactive_file_kb={} cg_pgfault={} cg_pgmajfault={} cg_workingset_refault_file={} cg_workingset_activate_file={}",
+        sample.fmt_rss(),
+        sample.fmt_cg(),
+        sample.fmt_gap(),
+        sample.fmt_anon(),
+        sample.fmt_file(),
+        sample.fmt_shmem(),
+        sample.fmt_file_mapped(),
+        sample.fmt_active_file(),
+        sample.fmt_inactive_file(),
+        sample.fmt_pgfault(),
+        sample.fmt_pgmajfault(),
+        sample.fmt_workingset_refault_file(),
+        sample.fmt_workingset_activate_file(),
+    )
+}
+
+fn format_backup_failure_memory_suffix(
+    before: &MemSample,
+    after_archive: &MemSample,
+    after_upload: &MemSample,
+    final_sample: &MemSample,
+) -> String {
+    if !memdiag::memory_diagnostic_logs_enabled() {
+        return String::new();
+    }
+    format!(
+        " rss_before_kb={} cg_before_kb={} gap_before_kb={} rss_after_archive_kb={} cg_after_archive_kb={} gap_after_archive_kb={} rss_after_upload_kb={} cg_after_upload_kb={} gap_after_upload_kb={} rss_final_kb={} cg_final_kb={} gap_final_kb={} cg_anon_final_kb={} cg_file_final_kb={} cg_shmem_final_kb={} cg_file_mapped_final_kb={} cg_active_file_final_kb={} cg_inactive_file_final_kb={} pgfault_delta={} pgmajfault_delta={} workingset_refault_file_delta={} workingset_activate_file_delta={}",
+        before.fmt_rss(),
+        before.fmt_cg(),
+        before.fmt_gap(),
+        after_archive.fmt_rss(),
+        after_archive.fmt_cg(),
+        after_archive.fmt_gap(),
+        after_upload.fmt_rss(),
+        after_upload.fmt_cg(),
+        after_upload.fmt_gap(),
+        final_sample.fmt_rss(),
+        final_sample.fmt_cg(),
+        final_sample.fmt_gap(),
+        final_sample.fmt_anon(),
+        final_sample.fmt_file(),
+        final_sample.fmt_shmem(),
+        final_sample.fmt_file_mapped(),
+        final_sample.fmt_active_file(),
+        final_sample.fmt_inactive_file(),
+        memdiag::format_counter_delta(memdiag::counter_delta(
+            before.cg_pgfault,
+            final_sample.cg_pgfault,
+        )),
+        memdiag::format_counter_delta(memdiag::counter_delta(
+            before.cg_pgmajfault,
+            final_sample.cg_pgmajfault,
+        )),
+        memdiag::format_counter_delta(memdiag::counter_delta(
+            before.cg_workingset_refault_file,
+            final_sample.cg_workingset_refault_file,
+        )),
+        memdiag::format_counter_delta(memdiag::counter_delta(
+            before.cg_workingset_activate_file,
+            final_sample.cg_workingset_activate_file,
+        )),
     )
 }
 

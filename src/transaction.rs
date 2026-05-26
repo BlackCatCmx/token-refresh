@@ -133,12 +133,12 @@ impl RefreshTransaction {
 
         let mem_context = RefreshMemContext {
             started_at: Instant::now(),
-            before: memdiag::sample_full(),
+            before: sample_full_for_memory_log(),
         };
         self.logger.runtime(
             "info",
             format!(
-                "refresh starting for {} in {} via {} (expires_at={}, last_refresh={}, proxy_mode={}, timeout={}, rss_before_kb={}, cg_before_kb={}, gap_before_kb={}, cg_anon_kb={}, cg_file_kb={}, cg_shmem_kb={}, cg_file_mapped_kb={}, cg_active_file_kb={}, cg_inactive_file_kb={}, cg_pgfault={}, cg_pgmajfault={}, cg_workingset_refault_file={}, cg_workingset_activate_file={})",
+                "refresh starting for {} in {} via {} (expires_at={}, last_refresh={}, proxy_mode={}, timeout={}{})",
                 key,
                 zone.as_str(),
                 trigger.as_str(),
@@ -146,19 +146,7 @@ impl RefreshTransaction {
                 credential.last_refresh.as_deref().unwrap_or("-"),
                 config.proxy.mode.trim(),
                 config.network.timeout.trim(),
-                mem_context.before.fmt_rss(),
-                mem_context.before.fmt_cg(),
-                mem_context.before.fmt_gap(),
-                mem_context.before.fmt_anon(),
-                mem_context.before.fmt_file(),
-                mem_context.before.fmt_shmem(),
-                mem_context.before.fmt_file_mapped(),
-                mem_context.before.fmt_active_file(),
-                mem_context.before.fmt_inactive_file(),
-                mem_context.before.fmt_pgfault(),
-                mem_context.before.fmt_pgmajfault(),
-                mem_context.before.fmt_workingset_refault_file(),
-                mem_context.before.fmt_workingset_activate_file(),
+                format_refresh_start_memory_suffix(&mem_context.before),
             ),
         )?;
 
@@ -490,6 +478,9 @@ impl RefreshTransaction {
         outcome: &str,
         mem_context: &RefreshMemContext,
     ) -> Result<()> {
+        if !memdiag::memory_diagnostic_logs_enabled() {
+            return Ok(());
+        }
         let mem_after = memdiag::sample_full();
         self.logger.runtime(
             "info",
@@ -538,6 +529,36 @@ impl RefreshTransaction {
             ),
         )
     }
+}
+
+fn sample_full_for_memory_log() -> MemSample {
+    if memdiag::memory_diagnostic_logs_enabled() {
+        memdiag::sample_full()
+    } else {
+        MemSample::default()
+    }
+}
+
+fn format_refresh_start_memory_suffix(sample: &MemSample) -> String {
+    if !memdiag::memory_diagnostic_logs_enabled() {
+        return String::new();
+    }
+    format!(
+        ", rss_before_kb={}, cg_before_kb={}, gap_before_kb={}, cg_anon_kb={}, cg_file_kb={}, cg_shmem_kb={}, cg_file_mapped_kb={}, cg_active_file_kb={}, cg_inactive_file_kb={}, cg_pgfault={}, cg_pgmajfault={}, cg_workingset_refault_file={}, cg_workingset_activate_file={}",
+        sample.fmt_rss(),
+        sample.fmt_cg(),
+        sample.fmt_gap(),
+        sample.fmt_anon(),
+        sample.fmt_file(),
+        sample.fmt_shmem(),
+        sample.fmt_file_mapped(),
+        sample.fmt_active_file(),
+        sample.fmt_inactive_file(),
+        sample.fmt_pgfault(),
+        sample.fmt_pgmajfault(),
+        sample.fmt_workingset_refault_file(),
+        sample.fmt_workingset_activate_file(),
+    )
 }
 
 fn should_fallback_to_next_proxy(error: &RefreshFailure) -> bool {

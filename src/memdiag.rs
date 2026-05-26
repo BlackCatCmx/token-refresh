@@ -1,5 +1,19 @@
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
+use std::env;
+
+const MEMORY_DIAGNOSTIC_LOGS_ENV: &str = "MEMORY_DIAGNOSTIC_LOGS_ENABLED";
+
+pub fn memory_diagnostic_logs_enabled() -> bool {
+    env::var(MEMORY_DIAGNOSTIC_LOGS_ENV).is_ok_and(|value| parse_env_bool(&value))
+}
+
+fn parse_env_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemSample {
@@ -380,5 +394,15 @@ mod tests {
             format_counter_delta(counter_delta(Some(42), Some(10))),
             "reset:32"
         );
+    }
+
+    #[test]
+    fn parses_memory_diagnostic_log_env_bool() {
+        for value in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(parse_env_bool(value));
+        }
+        for value in ["", "0", "false", "no", "off", "enabled"] {
+            assert!(!parse_env_bool(value));
+        }
     }
 }

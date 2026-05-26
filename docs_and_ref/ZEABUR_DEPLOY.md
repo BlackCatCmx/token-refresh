@@ -2,19 +2,22 @@
 
 ## 环境变量
 
-只保留两个环境变量入口：
+只保留以下环境变量入口：
 
 - `WEB_PASSWORD`：必填，管理页面登录密码
 - `LOG_LEVEL`：可选，用来固定日志级别，仅支持 `info`、`warn`、`error`
 - `PORT`：平台注入的监听端口
+- `MEMORY_DIAGNOSTIC_LOGS_ENABLED`：可选，开启内存诊断日志；未设置时默认为关闭
 
-除了这三个，其他设置不再走环境变量覆盖。
+除了这些变量，其他设置不再走环境变量覆盖。
 
 说明：
 
 - 默认值是 `info`
 - `info` 是当前最详细的运行日志级别
 - 审计日志不受 `LOG_LEVEL` 影响
+- `MEMORY_DIAGNOSTIC_LOGS_ENABLED` 仅控制 `rss_*`、`cg_*`、`pgfault_*`、`workingset_*` 等内存诊断字段和 `backup metrics`、`refresh metrics` 诊断行
+- `MEMORY_DIAGNOSTIC_LOGS_ENABLED` 只有设置为 `1`、`true`、`yes`、`on` 时才开启；未设置、空值或其他值都视为关闭
 
 ## 卷路径
 
@@ -40,11 +43,12 @@
 
 1. `WEB_PASSWORD`
 2. `LOG_LEVEL`
-3. `PORT`
-4. `./config.yaml`
-5. `/data/state/config.yaml`
-6. `./state/config.yaml`
-7. 内置默认值
+3. `MEMORY_DIAGNOSTIC_LOGS_ENABLED`
+4. `PORT`
+5. `./config.yaml`
+6. `/data/state/config.yaml`
+7. `./state/config.yaml`
+8. 内置默认值
 
 说明：
 
