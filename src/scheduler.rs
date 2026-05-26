@@ -437,50 +437,14 @@ impl SchedulerRuntime {
         next_key: Option<String>,
         future_due: &[FutureDueEntry],
     ) -> Result<bool> {
-        let mut next_future_index = first_future_due_after(future_due, Utc::now());
-        loop {
-            let now = Utc::now();
-            if now >= delay_until {
-                return Ok(false);
-            }
-            while next_future_index < future_due.len()
-                && future_due[next_future_index].due_at <= now
-            {
-                next_future_index += 1;
-            }
-            let sleep_until = future_due
-                .get(next_future_index)
-                .map(|entry| entry.due_at)
-                .filter(|value| *value < delay_until)
-                .unwrap_or(delay_until);
-            let sleep_duration = (sleep_until - now)
-                .to_std()
-                .unwrap_or_else(|_| Duration::from_secs(1));
-            let mut wake_requested = false;
-            tokio::select! {
-                _ = tokio::time::sleep(sleep_duration) => {}
-                _ = self.notify.notified() => {
-                    wake_requested = true;
-                }
-            }
-            if wake_requested {
-                return Ok(true);
-            }
-            let now = Utc::now();
-            if now >= delay_until {
-                return Ok(false);
-            }
-            while next_future_index < future_due.len()
-                && future_due[next_future_index].due_at <= now
-            {
-                next_future_index += 1;
-            }
-            let mut status = self.status.write().await;
-            status.next_key = next_key.clone();
-            status.next_due_at = future_due
-                .get(next_future_index)
-                .map(|entry| entry.due_at.to_rfc3339());
-        }
+        wait_inter_refresh_delay_state(
+            self.notify.as_ref(),
+            self.status.as_ref(),
+            delay_until,
+            next_key,
+            future_due,
+        )
+        .await
     }
 
     async fn run_manual_refresh_all(&self) -> Result<()> {
@@ -716,6 +680,55 @@ fn first_future_due_after(future_due: &[FutureDueEntry], now: DateTime<Utc>) -> 
         .unwrap_or(future_due.len())
 }
 
+async fn wait_inter_refresh_delay_state(
+    notify: &Notify,
+    status: &RwLock<SchedulerStatus>,
+    delay_until: DateTime<Utc>,
+    next_key: Option<String>,
+    future_due: &[FutureDueEntry],
+) -> Result<bool> {
+    let mut next_future_index = first_future_due_after(future_due, Utc::now());
+    loop {
+        let now = Utc::now();
+        if now >= delay_until {
+            return Ok(false);
+        }
+        while next_future_index < future_due.len() && future_due[next_future_index].due_at <= now {
+            next_future_index += 1;
+        }
+        let sleep_until = future_due
+            .get(next_future_index)
+            .map(|entry| entry.due_at)
+            .filter(|value| *value < delay_until)
+            .unwrap_or(delay_until);
+        let sleep_duration = (sleep_until - now)
+            .to_std()
+            .unwrap_or_else(|_| Duration::from_secs(1));
+        let mut wake_requested = false;
+        tokio::select! {
+            _ = tokio::time::sleep(sleep_duration) => {}
+            _ = notify.notified() => {
+                wake_requested = true;
+            }
+        }
+        if wake_requested {
+            return Ok(true);
+        }
+        let now = Utc::now();
+        if now >= delay_until {
+            return Ok(false);
+        }
+        while next_future_index < future_due.len() && future_due[next_future_index].due_at <= now {
+            next_future_index += 1;
+        }
+        let mut guard = status.write().await;
+        guard.next_key = next_key.clone();
+        guard.next_due_at = future_due
+            .get(next_future_index)
+            .map(|entry| entry.due_at.to_rfc3339());
+    }
+}
+
 fn compute_idle_sleep(
     config: &crate::config::AppConfig,
     now: DateTime<Utc>,
@@ -820,6 +833,40 @@ mod tests {
 
         reloaded.start().await.unwrap();
         assert!(reloaded.status().await.enabled);
+    }
+
+    #[tokio::test]
+    async fn wake_interrupts_inter_refresh_delay() {
+        let temp = tempdir().unwrap();
+        let handle = SchedulerHandle::load(temp.path().join("scheduler_state.json")).unwrap();
+        let notify = handle.notify.clone();
+        let status = handle.status.clone();
+        let delay_until = Utc::now() + chrono::Duration::seconds(30);
+        let future_due = vec![FutureDueEntry {
+            key: "future.json".to_string(),
+            due_at: Utc::now() + chrono::Duration::minutes(30),
+        }];
+
+        let worker = tokio::spawn(async move {
+            wait_inter_refresh_delay_state(
+                notify.as_ref(),
+                status.as_ref(),
+                delay_until,
+                Some("queued.json".to_string()),
+                future_due.as_slice(),
+            )
+            .await
+            .unwrap()
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle.wake();
+
+        let wake_requested = tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(wake_requested);
     }
 
     #[test]
