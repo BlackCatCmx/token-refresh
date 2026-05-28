@@ -279,9 +279,9 @@
             <div><label>originator</label><input type="text" id="originator"></div>
             <div><label>UA 模式</label><select id="user-agent-mode" onchange="syncUserAgentMode()"><option value="list">list：手写列表</option><option value="generated">generated：按规则生成</option></select></div>
             <details id="user-agent-list-group" class="grid-full field-expand"><summary>User-Agent 列表</summary><textarea id="user-agent" rows="6" placeholder="一行一个 User-Agent；上传缺失时随机分配"></textarea></details>
-            <div id="user-agent-versions-group" class="grid-full" hidden><label>CLI 版本规则</label><textarea id="user-agent-versions" rows="3" placeholder="支持换行、,、; 分隔，例如 0.116.0, 0.117.0; 0.119.0；也兼容范围写法 0.114.0 - 0.118.0"></textarea></div>
+            <div id="user-agent-versions-group" class="grid-full" hidden><label>CLI 版本规则</label><textarea id="user-agent-versions" rows="3" placeholder="一行一个正式版本；也支持 , 和 ; 分隔；范围示例：0.128.0 - 0.132.0"></textarea></div>
             <div id="user-agent-profiles-group" class="grid-full" hidden><label>系统档案</label><textarea id="user-agent-profiles" rows="3" placeholder="一行一个：windows10 / windows11 / macos / ubuntu / debian"></textarea></div>
-            <div id="user-agent-terminals-group" class="grid-full" hidden><label>终端列表</label><textarea id="user-agent-terminals" rows="3" placeholder="一行一个：WindowsTerminal / Apple_Terminal / iTerm.app / vscode / WezTerm / Ghostty / WarpTerminal / kitty"></textarea></div>
+            <div id="user-agent-terminals-group" class="grid-full" hidden><label>终端列表</label><textarea id="user-agent-terminals" rows="3" placeholder="一行一个：WindowsTerminal / Apple_Terminal / iTerm.app / vscode / WezTerm / Ghostty / WarpTerminal / kitty；可写 vscode/1.122.0"></textarea></div>
           </div>
           <div id="user-agent-mode-hint" class="muted"></div>
         </details>

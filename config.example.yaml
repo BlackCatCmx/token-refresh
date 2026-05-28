@@ -7,15 +7,19 @@ logging:
   max_file_size: "1MiB"
 
 request_identity:
-  originator: "codex_cli_rs"
+  originator: "codex-tui"
   user_agent_mode: "generated"
   user_agent_rules:
     versions: |
-      0.114.0
-      0.115.0
-      0.116.0
-      0.117.0
-      0.118.0
+      0.124.0
+      0.125.0
+      0.128.0
+      0.129.0
+      0.130.0
+      0.131.0
+      0.132.0
+      0.133.0
+      0.134.0
     profiles: |
       windows10
       windows11

@@ -184,7 +184,7 @@ mod tests {
         RequestIdentityConfig {
             user_agent_mode: "generated".to_string(),
             user_agent_rules: crate::user_agent::UserAgentRulesConfig {
-                versions: "0.118.0".to_string(),
+                versions: "0.124.0".to_string(),
                 profiles: "windows10".to_string(),
                 terminals: "WindowsTerminal".to_string(),
             },
@@ -438,9 +438,7 @@ mod tests {
             refresh_token: "refresh".to_string(),
             provider_type: "codex".to_string(),
             email: Some("matching@example.com".to_string()),
-            user_agent: Some(
-                "codex_cli_rs/0.118.0 (Windows 10.0.19045; x86_64) WindowsTerminal".to_string(),
-            ),
+            user_agent: Some("codex_cli_rs/0.115.0 (Debian 13.4; x86_64) WezTerm".to_string()),
             ..CodexCredentialFile::default()
         };
         let custom = CodexCredentialFile {
@@ -460,7 +458,7 @@ mod tests {
 
         let summary = patch_user_agents(
             &store,
-            &request_identity_with_version("9.9.9"),
+            &request_identity_with_version("0.134.0"),
             UserAgentPatchMode::ReassignCliVersion,
         )
         .unwrap();
@@ -479,7 +477,7 @@ mod tests {
                 .credential
                 .as_ref()
                 .and_then(|credential| credential.user_agent.as_deref()),
-            Some("codex_cli_rs/9.9.9 (Windows 10.0.19045; x86_64) WindowsTerminal")
+            Some("codex-tui/0.134.0 (Debian 13.4; x86_64) WezTerm (codex-tui; 0.134.0)")
         );
         assert_eq!(
             store
@@ -525,8 +523,8 @@ mod tests {
             .to_string();
         assert!(matches!(
             user_agent.as_str(),
-            "codex_cli_rs/0.118.0 (Windows 10.0.19044; x86_64) WindowsTerminal"
-                | "codex_cli_rs/0.118.0 (Windows 10.0.19045; x86_64) WindowsTerminal"
+            "codex-tui/0.124.0 (Windows 10.0.19044; x86_64) WindowsTerminal (codex-tui; 0.124.0)"
+                | "codex-tui/0.124.0 (Windows 10.0.19045; x86_64) WindowsTerminal (codex-tui; 0.124.0)"
         ));
     }
 }

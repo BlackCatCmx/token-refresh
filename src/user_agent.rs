@@ -4,7 +4,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_USER_AGENT: &str =
-    "codex_cli_rs/0.118.0 (Windows 10.0.19045; x86_64) WindowsTerminal";
+    "codex-tui/0.134.0 (Windows 10.0.19045; x86_64) WindowsTerminal (codex-tui; 0.134.0)";
 pub const DEFAULT_USER_AGENT_MODE: &str = "list";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,7 +50,17 @@ struct OsProfileSpec {
     terminals: &'static [&'static str],
 }
 
-const TERMINAL_ALIASES: [(&str, &str); 14] = [
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TerminalRule {
+    canonical: &'static str,
+    token: String,
+}
+
+const LEGACY_ORIGINATOR_CODEX_CLI_RS: &str = "codex_cli_rs";
+const LEGACY_CODEX_ORIGINATORS: [&str; 1] = [LEGACY_ORIGINATOR_CODEX_CLI_RS];
+
+const TERMINAL_ALIASES: [(&str, &str); 16] = [
+    ("appleterminal", "Apple_Terminal"),
     ("windowsterminal", "WindowsTerminal"),
     ("windows terminal", "WindowsTerminal"),
     ("apple_terminal", "Apple_Terminal"),
@@ -62,6 +72,7 @@ const TERMINAL_ALIASES: [(&str, &str); 14] = [
     ("wezterm", "WezTerm"),
     ("ghostty", "Ghostty"),
     ("warpterminal", "WarpTerminal"),
+    ("warp terminal", "WarpTerminal"),
     ("warp", "WarpTerminal"),
     ("kitty", "kitty"),
     ("windows_terminal", "WindowsTerminal"),
@@ -101,9 +112,9 @@ const PROFILE_SPECS: [OsProfileSpec; 5] = [
     OsProfileSpec {
         aliases: &["macos", "mac"],
         key: "macos",
-        os_type: "macOS",
-        versions: &["14.7", "15.7", "26.4"],
-        arches: &["aarch64", "x86_64"],
+        os_type: "Mac OS",
+        versions: &["14.7.0", "15.7.0", "26.4.0"],
+        arches: &["arm64", "x86_64"],
         terminals: &[
             "Apple_Terminal",
             "iTerm.app",
@@ -208,8 +219,9 @@ pub fn reassign_cli_version(
     if originator.is_empty() {
         bail!("User-Agent originator cannot be empty");
     }
-    let prefix = format!("{originator}/");
-    let Some(remainder) = existing_user_agent.strip_prefix(&prefix) else {
+    let Some((matched_originator, remainder)) =
+        split_reassignable_codex_user_agent(existing_user_agent, originator)
+    else {
         return Ok(None);
     };
     let Some((current_version, suffix)) = remainder.split_once(' ') else {
@@ -219,6 +231,14 @@ pub fn reassign_cli_version(
         return Ok(None);
     }
     let next_version = pick_rule_version(&rules.versions)?;
+    let suffix = normalize_platform_suffix(suffix);
+    let suffix = update_client_suffix(
+        &suffix,
+        &matched_originator,
+        originator,
+        current_version,
+        &next_version,
+    );
     let updated = format!("{originator}/{next_version} {suffix}");
     validate(&updated)?;
     Ok(Some(updated))
@@ -318,11 +338,14 @@ fn generate_candidates(originator: &str, rules: &UserAgentRulesConfig) -> Result
             for os_version in profile.versions {
                 for arch in profile.arches {
                     for terminal in &terminals {
-                        if profile.terminals.contains(terminal) {
-                            let value = format!(
-                                "{originator}/{version} ({} {}; {}) {terminal}",
-                                profile.os_type, os_version, arch
+                        if profile.terminals.contains(&terminal.canonical) {
+                            let mut value = format!(
+                                "{originator}/{version} ({} {}; {}) {}",
+                                profile.os_type, os_version, arch, terminal.token
                             );
+                            if uses_client_suffix(originator) {
+                                value.push_str(format!(" ({originator}; {version})").as_str());
+                            }
                             validate(&value)?;
                             candidates.push(value);
                         }
@@ -442,21 +465,150 @@ fn parse_profiles(value: &str) -> Result<Vec<&'static OsProfileSpec>> {
     Ok(items)
 }
 
-fn parse_terminals(value: &str) -> Result<Vec<&'static str>> {
+fn parse_terminals(value: &str) -> Result<Vec<TerminalRule>> {
     let mut items = Vec::new();
     for token in split_rule_lines(value) {
-        let normalized = token.trim().to_ascii_lowercase();
-        let Some((_, terminal)) = TERMINAL_ALIASES
+        let terminal = parse_terminal_rule(token)?;
+        if !items
             .iter()
-            .find(|(alias, _)| alias.eq_ignore_ascii_case(&normalized))
-        else {
-            bail!("unsupported User-Agent terminal: {token}");
-        };
-        if !items.contains(terminal) {
-            items.push(*terminal);
+            .any(|existing: &TerminalRule| existing.token.eq_ignore_ascii_case(&terminal.token))
+        {
+            items.push(terminal);
         }
     }
     Ok(items)
+}
+
+fn parse_terminal_rule(token: &str) -> Result<TerminalRule> {
+    let token = token.trim();
+    let (name, version) = match token.split_once('/') {
+        Some((name, version)) => {
+            let version = version.trim();
+            if version.is_empty()
+                || version.contains('/')
+                || version.chars().any(char::is_whitespace)
+            {
+                bail!("invalid User-Agent terminal version: {token}");
+            }
+            (name.trim(), Some(version))
+        }
+        None => (token, None),
+    };
+    if name.is_empty() {
+        bail!("unsupported User-Agent terminal: {token}");
+    }
+    let normalized = name.to_ascii_lowercase();
+    let Some((_, canonical)) = TERMINAL_ALIASES
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(&normalized))
+    else {
+        bail!("unsupported User-Agent terminal: {token}");
+    };
+    let rendered = match version {
+        Some(version) => format!("{canonical}/{version}"),
+        None => (*canonical).to_string(),
+    };
+    if !rendered.chars().all(is_valid_terminal_token_char) {
+        bail!("invalid User-Agent terminal token: {token}");
+    }
+    HeaderValue::from_str(&rendered).context("invalid User-Agent terminal token")?;
+    Ok(TerminalRule {
+        canonical,
+        token: rendered,
+    })
+}
+
+fn split_reassignable_codex_user_agent<'a>(
+    existing_user_agent: &'a str,
+    target_originator: &str,
+) -> Option<(String, &'a str)> {
+    let target_prefix = format!("{target_originator}/");
+    if let Some(remainder) = existing_user_agent.strip_prefix(&target_prefix) {
+        return Some((target_originator.to_string(), remainder));
+    }
+    for legacy_originator in LEGACY_CODEX_ORIGINATORS {
+        if legacy_originator == target_originator {
+            continue;
+        }
+        let legacy_prefix = format!("{legacy_originator}/");
+        if let Some(remainder) = existing_user_agent.strip_prefix(&legacy_prefix) {
+            return Some((legacy_originator.to_string(), remainder));
+        }
+    }
+    None
+}
+
+fn update_client_suffix(
+    suffix: &str,
+    matched_originator: &str,
+    target_originator: &str,
+    current_version: &str,
+    next_version: &str,
+) -> String {
+    let next_suffix = format!("({target_originator}; {next_version})");
+    for current_originator in [matched_originator, target_originator] {
+        let current_suffix = format!("({current_originator}; {current_version})");
+        if let Some(prefix) = suffix.strip_suffix(&current_suffix) {
+            if !uses_client_suffix(target_originator) {
+                return prefix.trim_end().to_string();
+            }
+            return format!("{prefix}{next_suffix}");
+        }
+    }
+    if !uses_client_suffix(target_originator) {
+        return suffix.to_string();
+    }
+    format!("{suffix} {next_suffix}")
+}
+
+fn uses_client_suffix(originator: &str) -> bool {
+    // Official default CLI traffic uses codex_cli_rs without the app-server client suffix.
+    originator != LEGACY_ORIGINATOR_CODEX_CLI_RS
+}
+
+fn is_valid_terminal_token_char(value: char) -> bool {
+    value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | '.' | '/')
+}
+
+fn normalize_platform_suffix(suffix: &str) -> String {
+    let Some(rest) = suffix.strip_prefix('(') else {
+        return suffix.to_string();
+    };
+    let Some(end_index) = rest.find(')') else {
+        return suffix.to_string();
+    };
+    let platform = &rest[..end_index];
+    let tail = &rest[end_index + 1..];
+    match normalize_platform_segment(platform) {
+        Some(normalized) => format!("({normalized}){tail}"),
+        None => suffix.to_string(),
+    }
+}
+
+fn normalize_platform_segment(platform: &str) -> Option<String> {
+    let (os_and_version, arch) = platform.split_once(';')?;
+    let arch = arch.trim();
+    let os_and_version = os_and_version.trim();
+    let version = os_and_version
+        .strip_prefix("macOS ")
+        .or_else(|| os_and_version.strip_prefix("Mac OS "))?;
+    let version = normalize_macos_version(version)?;
+    let arch = match arch.to_ascii_lowercase().as_str() {
+        "aarch64" | "arm64" => "arm64",
+        _ => arch,
+    };
+    Some(format!("Mac OS {version}; {arch}"))
+}
+
+fn normalize_macos_version(value: &str) -> Option<String> {
+    let mut parts = value.trim().split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next().unwrap_or("0").parse::<u32>().ok()?;
+    let patch = parts.next().unwrap_or("0").parse::<u32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{major}.{minor}.{patch}"))
 }
 
 fn split_rule_lines(value: &str) -> Vec<&str> {
@@ -487,7 +639,7 @@ fn dedup_preserving_order(values: Vec<String>) -> Vec<String> {
 }
 
 fn default_generated_versions() -> String {
-    "0.114.0\n0.115.0\n0.116.0\n0.117.0\n0.118.0".to_string()
+    "0.124.0\n0.125.0\n0.128.0\n0.129.0\n0.130.0\n0.131.0\n0.132.0\n0.133.0\n0.134.0".to_string()
 }
 
 fn default_generated_profiles() -> String {
@@ -518,7 +670,7 @@ mod tests {
     #[test]
     fn list_mode_falls_back_to_default_when_empty() {
         let assigned = assign(
-            "codex_cli_rs",
+            "codex-tui",
             "list",
             " \r\n ",
             &UserAgentRulesConfig::default(),
@@ -529,76 +681,207 @@ mod tests {
 
     #[test]
     fn expands_minor_version_range() {
-        let versions = parse_version_tokens("0.114.0 - 0.118.0").unwrap();
+        let versions = parse_version_tokens("0.128.0 - 0.132.0").unwrap();
         assert_eq!(
             versions,
-            vec!["0.114.0", "0.115.0", "0.116.0", "0.117.0", "0.118.0"]
+            vec!["0.128.0", "0.129.0", "0.130.0", "0.131.0", "0.132.0"]
         );
     }
 
     #[test]
     fn parses_delimited_version_list() {
-        let versions = parse_version_tokens("0.116.0, 0.117.0;0.119.0\r\n0.120.0,0.117.0").unwrap();
-        assert_eq!(versions, vec!["0.116.0", "0.117.0", "0.119.0", "0.120.0"]);
+        let versions = parse_version_tokens("0.124.0, 0.125.0;0.129.0\r\n0.130.0,0.125.0").unwrap();
+        assert_eq!(versions, vec!["0.124.0", "0.125.0", "0.129.0", "0.130.0"]);
     }
 
     #[test]
     fn parses_mixed_version_ranges_and_delimiters() {
-        let versions = parse_version_tokens("0.114.0 - 0.115.0, 0.117.0; 0.115.0").unwrap();
-        assert_eq!(versions, vec!["0.114.0", "0.115.0", "0.117.0"]);
+        let versions = parse_version_tokens("0.128.0 - 0.129.0, 0.131.0; 0.129.0").unwrap();
+        assert_eq!(versions, vec!["0.128.0", "0.129.0", "0.131.0"]);
+    }
+
+    #[test]
+    fn default_generated_versions_are_published_releases_from_0_124() {
+        let versions = parse_version_tokens(&default_generated_versions()).unwrap();
+        assert_eq!(
+            versions,
+            vec![
+                "0.124.0", "0.125.0", "0.128.0", "0.129.0", "0.130.0", "0.131.0", "0.132.0",
+                "0.133.0", "0.134.0"
+            ]
+        );
     }
 
     #[test]
     fn generated_preview_uses_first_valid_combination() {
         let rules = UserAgentRulesConfig {
-            versions: "0.117.0\n0.118.0".to_string(),
+            versions: "0.124.0\n0.125.0".to_string(),
             profiles: "windows11\nmacos".to_string(),
             terminals: "Apple_Terminal\nWindowsTerminal\nvscode".to_string(),
         };
-        let preview = preview_value("codex_cli_rs", "generated", "", &rules);
+        let preview = preview_value("codex-tui", "generated", "", &rules);
         assert_eq!(
             preview,
-            "codex_cli_rs/0.117.0 (Windows 10.0.22631; x86_64) WindowsTerminal"
+            "codex-tui/0.124.0 (Windows 10.0.22631; x86_64) WindowsTerminal (codex-tui; 0.124.0)"
         );
     }
 
     #[test]
     fn generated_mode_rejects_incompatible_matrix() {
         let rules = UserAgentRulesConfig {
-            versions: "0.118.0".to_string(),
+            versions: "0.124.0".to_string(),
             profiles: "windows10".to_string(),
             terminals: "Apple_Terminal".to_string(),
         };
-        let err = validate_settings("codex_cli_rs", "generated", "", &rules).unwrap_err();
+        let err = validate_settings("codex-tui", "generated", "", &rules).unwrap_err();
         assert!(err.to_string().contains("did not produce any candidates"));
     }
 
     #[test]
     fn generated_mode_accepts_aliases() {
         let rules = UserAgentRulesConfig {
-            versions: "0.118.0".to_string(),
+            versions: "0.124.0".to_string(),
             profiles: "win11\nmac".to_string(),
             terminals: "windows terminal\nwarp".to_string(),
         };
-        validate_settings("codex_cli_rs", "generated", "", &rules).unwrap();
+        validate_settings("codex-tui", "generated", "", &rules).unwrap();
     }
 
     #[test]
-    fn reassign_cli_version_only_replaces_version_segment() {
+    fn generated_mode_accepts_versioned_terminal_tokens() {
+        let rules = UserAgentRulesConfig {
+            versions: "0.134.0".to_string(),
+            profiles: "windows11".to_string(),
+            terminals: "vscode/1.122.0\nWindowsTerminal".to_string(),
+        };
+        let preview = preview_value("codex-tui", "generated", "", &rules);
+        assert_eq!(
+            preview,
+            "codex-tui/0.134.0 (Windows 10.0.22631; x86_64) vscode/1.122.0 (codex-tui; 0.134.0)"
+        );
+    }
+
+    #[test]
+    fn generated_mode_omits_client_suffix_for_default_cli_originator() {
+        let rules = UserAgentRulesConfig {
+            versions: "0.134.0".to_string(),
+            profiles: "windows11".to_string(),
+            terminals: "WindowsTerminal".to_string(),
+        };
+        let preview = preview_value("codex_cli_rs", "generated", "", &rules);
+        assert_eq!(
+            preview,
+            "codex_cli_rs/0.134.0 (Windows 10.0.22631; x86_64) WindowsTerminal"
+        );
+    }
+
+    #[test]
+    fn generated_mode_uses_official_macos_platform_tokens() {
+        let rules = UserAgentRulesConfig {
+            versions: "0.134.0".to_string(),
+            profiles: "macos".to_string(),
+            terminals: "Apple_Terminal".to_string(),
+        };
+        let preview = preview_value("codex-tui", "generated", "", &rules);
+        assert_eq!(
+            preview,
+            "codex-tui/0.134.0 (Mac OS 14.7.0; arm64) Apple_Terminal (codex-tui; 0.134.0)"
+        );
+    }
+
+    #[test]
+    fn generated_mode_rejects_non_official_terminal_token_chars() {
+        for terminal in ["vscode/1.0;hack", "vscode/1.0/2.0"] {
+            let rules = UserAgentRulesConfig {
+                versions: "0.134.0".to_string(),
+                profiles: "windows11".to_string(),
+                terminals: terminal.to_string(),
+            };
+            let err = validate_settings("codex-tui", "generated", "", &rules).unwrap_err();
+            assert!(err.to_string().contains("terminal"));
+        }
+    }
+
+    #[test]
+    fn reassign_cli_version_omits_client_suffix_for_default_cli_originator() {
         let rules = UserAgentRulesConfig {
             versions: "9.9.9".to_string(),
             ..UserAgentRulesConfig::default()
         };
+        let cases = [
+            (
+                "codex_cli_rs/0.124.0 (Windows 10.0.19045; x86_64) WezTerm",
+                "codex_cli_rs/9.9.9 (Windows 10.0.19045; x86_64) WezTerm",
+            ),
+            (
+                "codex_cli_rs/0.124.0 (Windows 10.0.19045; x86_64) WezTerm (codex_cli_rs; 0.124.0)",
+                "codex_cli_rs/9.9.9 (Windows 10.0.19045; x86_64) WezTerm",
+            ),
+        ];
+
+        for (current, expected) in cases {
+            let updated = reassign_cli_version(current, "codex_cli_rs", &rules).unwrap();
+            assert_eq!(updated.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn reassign_cli_version_updates_client_suffix_when_present() {
+        let rules = UserAgentRulesConfig {
+            versions: "0.134.0".to_string(),
+            ..UserAgentRulesConfig::default()
+        };
         let updated = reassign_cli_version(
-            "codex_cli_rs/0.118.0 (Windows 10.0.19045; x86_64) WezTerm",
-            "codex_cli_rs",
+            "codex-tui/0.133.0 (Windows 10.0.19045; x86_64) WindowsTerminal (codex-tui; 0.133.0)",
+            "codex-tui",
             &rules,
         )
         .unwrap();
         assert_eq!(
             updated.as_deref(),
-            Some("codex_cli_rs/9.9.9 (Windows 10.0.19045; x86_64) WezTerm")
+            Some(
+                "codex-tui/0.134.0 (Windows 10.0.19045; x86_64) WindowsTerminal (codex-tui; 0.134.0)"
+            )
         );
+    }
+
+    #[test]
+    fn reassign_cli_version_accepts_legacy_originator_and_preserves_platform() {
+        let rules = UserAgentRulesConfig {
+            versions: "0.134.0".to_string(),
+            ..UserAgentRulesConfig::default()
+        };
+        let cases = [
+            (
+                "codex_cli_rs/0.115.0 (Debian 13.4; x86_64) WezTerm",
+                "codex-tui/0.134.0 (Debian 13.4; x86_64) WezTerm (codex-tui; 0.134.0)",
+            ),
+            (
+                "codex_cli_rs/0.114.0 (Ubuntu 24.10; x86_64) WarpTerminal",
+                "codex-tui/0.134.0 (Ubuntu 24.10; x86_64) WarpTerminal (codex-tui; 0.134.0)",
+            ),
+            (
+                "codex_cli_rs/0.116.0 (Windows 10.0.19045; x86_64) WezTerm",
+                "codex-tui/0.134.0 (Windows 10.0.19045; x86_64) WezTerm (codex-tui; 0.134.0)",
+            ),
+            (
+                "codex_cli_rs/0.116.0 (Debian 13.4; aarch64) WezTerm",
+                "codex-tui/0.134.0 (Debian 13.4; aarch64) WezTerm (codex-tui; 0.134.0)",
+            ),
+            (
+                "codex_cli_rs/0.116.0 (macOS 14.7; aarch64) Apple_Terminal",
+                "codex-tui/0.134.0 (Mac OS 14.7.0; arm64) Apple_Terminal (codex-tui; 0.134.0)",
+            ),
+            (
+                "codex_cli_rs/0.116.0 (Mac OS 15.7; x86_64) iTerm.app",
+                "codex-tui/0.134.0 (Mac OS 15.7.0; x86_64) iTerm.app (codex-tui; 0.134.0)",
+            ),
+        ];
+
+        for (current, expected) in cases {
+            let updated = reassign_cli_version(current, "codex-tui", &rules).unwrap();
+            assert_eq!(updated.as_deref(), Some(expected));
+        }
     }
 
     #[test]
@@ -608,7 +891,7 @@ mod tests {
             ..UserAgentRulesConfig::default()
         };
         let updated = reassign_cli_version(
-            "custom_cli/0.118.0 (Windows 10.0.19045; x86_64) WezTerm",
+            "custom_cli/0.124.0 (Windows 10.0.19045; x86_64) WezTerm",
             "codex_cli_rs",
             &rules,
         )

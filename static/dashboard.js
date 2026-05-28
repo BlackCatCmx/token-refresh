@@ -490,7 +490,7 @@ function syncUserAgentMode() {
   document.getElementById("user-agent-terminals-group").hidden = listMode;
   document.getElementById("user-agent-mode-hint").textContent = listMode
     ? "list 模式：直接从手写 UA 列表里抽一条。"
-    : "generated 模式：按版本、系统档案和终端白名单组合出合规 UA。";
+    : "generated 模式：按版本、系统档案和终端白名单组合，并追加客户端版本后缀。";
 }
 
 async function refreshHeaderPreview() {
@@ -1267,7 +1267,7 @@ async function fillMissingUserAgents() {
 }
 
 async function reassignCliVersions() {
-  if (!confirm("这会只重写 UA 里的 codex_cli_rs/version 段，系统和终端信息保持不变。确认继续吗？")) return;
+  if (!confirm("这会把旧 codex_cli_rs UA 重配为当前 originator/version；codex-tui 会同步客户端版本后缀，旧 macOS 片段会按官方格式规范化。确认继续吗？")) return;
   const data = await api("api/credentials/user-agent/reassign-cli-version", { method: "POST" });
   await refreshAll();
   alert(formatUserAgentPatchMessage("重配 UA-cx 版本", data));
