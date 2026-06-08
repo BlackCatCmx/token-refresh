@@ -300,7 +300,7 @@ impl CpaManager {
                     &client,
                     &entry,
                     CredentialZone::Normal,
-                    exhausted_resets_at(&entry),
+                    exhausted_resets_at(&entry, Utc::now()),
                     ImportStatusKind::NormalExhausted,
                 )
                 .await
@@ -466,7 +466,7 @@ impl CpaManager {
                     &client,
                     &entry,
                     target_zone,
-                    exhausted_resets_at(&entry),
+                    exhausted_resets_at(&entry, Utc::now()),
                     status_kind,
                 )
                 .await
@@ -1064,32 +1064,27 @@ fn is_unauthorized_entry(entry: &CpaAuthEntry) -> bool {
 
 fn is_exhausted_entry(entry: &CpaAuthEntry) -> bool {
     let status = entry.status.trim().to_ascii_lowercase();
-    let status_message = entry.status_message.trim().to_ascii_lowercase();
-    status == "error"
-        && (status_message.contains("quota exhausted")
-            || status_message.contains("usage_limit_reached")
-            || status_message.contains("usage limit has been reached")
-            || status_message_has_usage_limit_type(&entry.status_message))
+    status == "error" && status_message_indicates_exhausted(&entry.status_message)
 }
 
-fn exhausted_resets_at(entry: &CpaAuthEntry) -> Option<String> {
+fn exhausted_resets_at(entry: &CpaAuthEntry, now: chrono::DateTime<Utc>) -> Option<String> {
     entry
         .next_retry_after
         .clone()
-        .or_else(|| parse_status_message_resets_at(&entry.status_message, Utc::now()))
+        .or_else(|| parse_status_message_resets_at(&entry.status_message, now))
 }
 
-fn status_message_has_usage_limit_type(status_message: &str) -> bool {
-    let Some(error) = parse_status_message_error(status_message) else {
-        return false;
-    };
-    let error_type = error
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    error_type == "usage_limit_reached"
+fn status_message_indicates_exhausted(status_message: &str) -> bool {
+    let status_message_lower = status_message.trim().to_ascii_lowercase();
+    if status_message_lower.contains("quota exhausted")
+        || status_message_lower.contains("usage limit has been reached")
+    {
+        return true;
+    }
+    if status_message_error_type(status_message).as_deref() == Some("usage_limit_reached") {
+        return true;
+    }
+    false
 }
 
 fn parse_status_message_resets_at(
@@ -1097,12 +1092,21 @@ fn parse_status_message_resets_at(
     now: chrono::DateTime<Utc>,
 ) -> Option<String> {
     let error = parse_status_message_error(status_message)?;
-    if let Some(resets_at) = json_i64(error.get("resets_at")).filter(|value| *value > 0) {
+    if let Some(resets_at) =
+        json_i64(error.get("resets_at")).filter(|value| *value > now.timestamp())
+    {
         return chrono::DateTime::<Utc>::from_timestamp(resets_at, 0)
             .map(|value| value.to_rfc3339());
     }
     let resets_in_seconds = json_i64(error.get("resets_in_seconds")).filter(|value| *value > 0)?;
     Some((now + ChronoDuration::seconds(resets_in_seconds)).to_rfc3339())
+}
+
+fn status_message_error_type(status_message: &str) -> Option<String> {
+    parse_status_message_error(status_message)?
+        .get("type")?
+        .as_str()
+        .map(|value| value.trim().to_ascii_lowercase())
 }
 
 fn parse_status_message_error(status_message: &str) -> Option<Value> {
@@ -1371,11 +1375,44 @@ mod tests {
             runtime_only: false,
             next_retry_after: None,
         };
+        let now = parse_rfc3339("2029-12-31T23:00:00Z").unwrap();
         assert!(is_exhausted_entry(&entry));
         assert_eq!(
-            exhausted_resets_at(&entry).as_deref(),
+            exhausted_resets_at(&entry, now).as_deref(),
             Some("2030-01-01T00:00:00+00:00")
         );
+    }
+
+    #[test]
+    fn classifies_usage_limit_type_without_message_as_exhausted() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "error".to_string(),
+            status_message: r#"{"error":{"type":"usage_limit_reached"}}"#.to_string(),
+            disabled: false,
+            unavailable: false,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(is_exhausted_entry(&entry));
+    }
+
+    #[test]
+    fn plain_usage_limit_token_is_not_enough_to_mark_exhausted() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "error".to_string(),
+            status_message: "usage_limit_reached".to_string(),
+            disabled: false,
+            unavailable: false,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(!is_exhausted_entry(&entry));
     }
 
     #[test]
@@ -1401,6 +1438,18 @@ mod tests {
     }
 
     #[test]
+    fn expired_status_message_resets_at_falls_back_to_resets_in_seconds() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let status_message =
+            r#"{"error":{"type":"usage_limit_reached","resets_at":1,"resets_in_seconds":9}}"#;
+
+        assert_eq!(
+            parse_status_message_resets_at(status_message, now).as_deref(),
+            Some("2030-01-01T00:00:09+00:00")
+        );
+    }
+
+    #[test]
     fn prefers_cpa_next_retry_after_over_raw_status_message_reset() {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
@@ -1416,7 +1465,7 @@ mod tests {
         };
 
         assert_eq!(
-            exhausted_resets_at(&entry).as_deref(),
+            exhausted_resets_at(&entry, Utc::now()).as_deref(),
             Some("2030-02-01T00:00:00Z")
         );
     }
