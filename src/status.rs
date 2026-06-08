@@ -133,7 +133,6 @@ impl CredentialStatusStore {
         record.last_failure_at = None;
         record.moved_to_abnormal_at = None;
         record.last_success_at = Some(now);
-        clear_cpa_flags(record);
         let snapshot = record.clone();
         let _ = record;
         persist_locked(&self.path, &guard)?;
@@ -270,4 +269,29 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_success_preserves_cpa_exhausted_flags() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CredentialStatusStore::load(temp.path().join("status.json")).unwrap();
+        store
+            .set_cpa_exhausted("user.json", Some("2026-07-08T12:00:00Z".to_string()))
+            .unwrap();
+
+        let record = store.record_success("user.json", "normal").unwrap();
+
+        assert_eq!(record.consecutive_failure_count, 0);
+        assert_eq!(record.last_failure_code, None);
+        assert_eq!(record.cpa_exhausted, Some(true));
+        assert!(record.cpa_imported_at.is_some());
+        assert_eq!(
+            record.exhausted_resets_at.as_deref(),
+            Some("2026-07-08T12:00:00Z")
+        );
+    }
 }

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::backup::BackupCoordinator;
@@ -19,7 +20,7 @@ use crate::scheduler::SchedulerHandle as RefreshSchedulerHandle;
 use crate::status::{CredentialStatusRecord, CredentialStatusStore, normalize_status_key};
 use crate::write_coordinator::WriteCoordinator;
 
-const EXHAUSTED_RESET_FALLBACK_HOURS: i64 = 7 * 24 + 12;
+const EXHAUSTED_RESET_FALLBACK_HOURS: i64 = 30 * 24 + 1;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct InspectResult {
@@ -299,7 +300,7 @@ impl CpaManager {
                     &client,
                     &entry,
                     CredentialZone::Normal,
-                    entry.next_retry_after.clone(),
+                    exhausted_resets_at(&entry),
                     ImportStatusKind::NormalExhausted,
                 )
                 .await
@@ -465,7 +466,7 @@ impl CpaManager {
                     &client,
                     &entry,
                     target_zone,
-                    entry.next_retry_after.clone(),
+                    exhausted_resets_at(&entry),
                     status_kind,
                 )
                 .await
@@ -1064,7 +1065,60 @@ fn is_unauthorized_entry(entry: &CpaAuthEntry) -> bool {
 fn is_exhausted_entry(entry: &CpaAuthEntry) -> bool {
     let status = entry.status.trim().to_ascii_lowercase();
     let status_message = entry.status_message.trim().to_ascii_lowercase();
-    status == "error" && status_message.contains("quota exhausted")
+    status == "error"
+        && (status_message.contains("quota exhausted")
+            || status_message.contains("usage_limit_reached")
+            || status_message.contains("usage limit has been reached")
+            || status_message_has_usage_limit_type(&entry.status_message))
+}
+
+fn exhausted_resets_at(entry: &CpaAuthEntry) -> Option<String> {
+    entry
+        .next_retry_after
+        .clone()
+        .or_else(|| parse_status_message_resets_at(&entry.status_message, Utc::now()))
+}
+
+fn status_message_has_usage_limit_type(status_message: &str) -> bool {
+    let Some(error) = parse_status_message_error(status_message) else {
+        return false;
+    };
+    let error_type = error
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    error_type == "usage_limit_reached"
+}
+
+fn parse_status_message_resets_at(
+    status_message: &str,
+    now: chrono::DateTime<Utc>,
+) -> Option<String> {
+    let error = parse_status_message_error(status_message)?;
+    if let Some(resets_at) = json_i64(error.get("resets_at")).filter(|value| *value > 0) {
+        return chrono::DateTime::<Utc>::from_timestamp(resets_at, 0)
+            .map(|value| value.to_rfc3339());
+    }
+    let resets_in_seconds = json_i64(error.get("resets_in_seconds")).filter(|value| *value > 0)?;
+    Some((now + ChronoDuration::seconds(resets_in_seconds)).to_rfc3339())
+}
+
+fn parse_status_message_error(status_message: &str) -> Option<Value> {
+    let parsed: Value = serde_json::from_str(status_message.trim()).ok()?;
+    parsed
+        .get("error")
+        .cloned()
+        .or_else(|| parsed.pointer("/body/error").cloned())
+}
+
+fn json_i64(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(number) => number.as_i64(),
+        Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }
 }
 
 fn is_disabled_entry(entry: &CpaAuthEntry) -> bool {
@@ -1266,6 +1320,11 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_reset_fallback_matches_monthly_quota_window() {
+        assert_eq!(EXHAUSTED_RESET_FALLBACK_HOURS, 721);
+    }
+
+    #[test]
     fn classifies_json_401_entries() {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
@@ -1297,6 +1356,69 @@ mod tests {
             next_retry_after: None,
         };
         assert!(is_exhausted_entry(&entry));
+    }
+
+    #[test]
+    fn classifies_usage_limit_reached_entries_as_exhausted() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "error".to_string(),
+            status_message: r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_at":1893456000,"resets_in_seconds":60}}"#.to_string(),
+            disabled: false,
+            unavailable: false,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(is_exhausted_entry(&entry));
+        assert_eq!(
+            exhausted_resets_at(&entry).as_deref(),
+            Some("2030-01-01T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn parses_wrapped_usage_limit_resets_in_seconds() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "error".to_string(),
+            status_message: r#"{"status":429,"body":{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":"7"}}}"#.to_string(),
+            disabled: false,
+            unavailable: false,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+
+        assert!(is_exhausted_entry(&entry));
+        assert_eq!(
+            parse_status_message_resets_at(&entry.status_message, now).as_deref(),
+            Some("2030-01-01T00:00:07+00:00")
+        );
+    }
+
+    #[test]
+    fn prefers_cpa_next_retry_after_over_raw_status_message_reset() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            status: "error".to_string(),
+            status_message: r#"{"error":{"type":"usage_limit_reached","resets_at":1893456000}}"#
+                .to_string(),
+            disabled: false,
+            unavailable: false,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: Some("2030-02-01T00:00:00Z".to_string()),
+        };
+
+        assert_eq!(
+            exhausted_resets_at(&entry).as_deref(),
+            Some("2030-02-01T00:00:00Z")
+        );
     }
 
     #[test]

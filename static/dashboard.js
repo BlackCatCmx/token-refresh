@@ -741,7 +741,7 @@ function buildCredCard(zone, row) {
 }
 
 function formatExhaustedBadge(resetsAt) {
-  if (!resetsAt) return "耗尽（~7d 后自动恢复）";
+  if (!resetsAt) return "耗尽（约30天1小时后自动恢复）";
   const d = new Date(resetsAt);
   if (isNaN(d.getTime())) return `耗尽（重置于 ${resetsAt}）`;
   const mm = String(d.getMonth() + 1).padStart(2, "0");
