@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -51,6 +51,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/credentials/refresh", post(refresh_credential))
         .route("/api/credentials/restore", post(restore_credentials))
+        .route(
+            "/api/credentials/cpa-exhausted/clear",
+            post(clear_cpa_exhausted_credentials),
+        )
         .route("/api/credentials/delete", post(delete_credentials))
         .route(
             "/api/credentials/content",
@@ -532,6 +536,40 @@ async fn restore_credentials(
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ClearCpaExhaustedResponse {
+    selected: usize,
+    cleared: usize,
+    skipped: usize,
+}
+
+async fn clear_cpa_exhausted_credentials(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<NamesRequest>,
+) -> Response {
+    let _commit_guard = match acquire_write_guard(&state).await {
+        Ok(guard) => guard,
+        Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
+    };
+    match clear_cpa_exhausted_statuses(&state.store, &state.status_store, &payload.names) {
+        Ok(summary) => {
+            if summary.cleared > 0 {
+                let _ = state.logger.runtime(
+                    "info",
+                    format!(
+                        "cleared CPA exhausted flag for {} normal credential(s), skipped {}",
+                        summary.cleared, summary.skipped
+                    ),
+                );
+                state.backup.mark_dirty("clear_cpa_exhausted");
+                state.scheduler.wake();
+            }
+            Json(summary).into_response()
+        }
+        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    }
+}
+
 async fn delete_credentials(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<DeleteRequest>,
@@ -571,6 +609,45 @@ async fn delete_credentials(
 struct DeleteRequest {
     zone: String,
     names: Vec<String>,
+}
+
+fn clear_cpa_exhausted_statuses(
+    store: &CredentialStore,
+    status_store: &crate::status::CredentialStatusStore,
+    names: &[String],
+) -> Result<ClearCpaExhaustedResponse> {
+    let mut seen = BTreeSet::new();
+    let mut selected = 0usize;
+    let mut cleared = 0usize;
+    let mut skipped = 0usize;
+
+    for raw_name in names {
+        let name = raw_name.trim();
+        if name.is_empty() || !seen.insert(name.to_string()) {
+            continue;
+        }
+        selected += 1;
+        if !store.key_to_path(CredentialZone::Normal, name)?.exists() {
+            skipped += 1;
+            continue;
+        }
+        let exhausted = status_store
+            .get(name)?
+            .and_then(|record| record.cpa_exhausted)
+            .unwrap_or(false);
+        if exhausted {
+            status_store.clear_cpa_exhausted(name)?;
+            cleared += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    Ok(ClearCpaExhaustedResponse {
+        selected,
+        cleared,
+        skipped,
+    })
 }
 
 fn move_credentials(
@@ -1317,6 +1394,8 @@ fn validate_credential_content(content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
+    use crate::status::CredentialStatusStore;
 
     #[test]
     fn validate_credential_content_accepts_valid_codex_json() {
@@ -1334,6 +1413,68 @@ mod tests {
     fn validate_credential_content_rejects_non_codex_json() {
         let raw = r#"{"type":"other","access_token":"a","refresh_token":"b"}"#;
         assert!(validate_credential_content(raw).is_err());
+    }
+
+    #[test]
+    fn clear_cpa_exhausted_statuses_only_clears_exhausted_normal_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let status_store = CredentialStatusStore::load(temp.path().join("status.json")).unwrap();
+        let credential = CodexCredentialFile {
+            provider_type: "codex".to_string(),
+            refresh_token: "refresh".to_string(),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "exhausted.json", &credential)
+            .unwrap();
+        store
+            .write_credential(CredentialZone::Normal, "normal.json", &credential)
+            .unwrap();
+        store
+            .write_credential(CredentialZone::Abnormal, "abnormal.json", &credential)
+            .unwrap();
+        status_store
+            .set_cpa_exhausted("exhausted.json", Some("2030-01-01T00:00:00Z".to_string()))
+            .unwrap();
+        status_store
+            .set_cpa_exhausted("abnormal.json", Some("2030-01-01T00:00:00Z".to_string()))
+            .unwrap();
+
+        let summary = clear_cpa_exhausted_statuses(
+            &store,
+            &status_store,
+            &[
+                "exhausted.json".to_string(),
+                "exhausted.json".to_string(),
+                "normal.json".to_string(),
+                "missing.json".to_string(),
+                "abnormal.json".to_string(),
+                "".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(summary.selected, 4);
+        assert_eq!(summary.cleared, 1);
+        assert_eq!(summary.skipped, 3);
+        assert_eq!(
+            status_store
+                .get("exhausted.json")
+                .unwrap()
+                .and_then(|record| record.cpa_exhausted),
+            None
+        );
+        assert_eq!(
+            status_store
+                .get("abnormal.json")
+                .unwrap()
+                .and_then(|record| record.cpa_exhausted),
+            Some(true)
+        );
     }
 
     #[test]

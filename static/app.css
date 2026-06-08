@@ -781,6 +781,16 @@ pre {
   color: #fff;
 }
 
+.badge-exhausted-action {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.badge-exhausted-action:hover {
+  background: #d97706;
+}
+
 /* ── CPA Status Tiles ── */
 .cpa-status-tiles {
   display: grid;

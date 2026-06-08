@@ -706,7 +706,7 @@ function buildCredCard(zone, row) {
     ? '<span class="pill pill-warn">异常区</span>'
     : '<span class="pill">正常</span>';
   const exhaustedBadge = zone === "normal" && row.cpa_exhausted
-    ? `<span class="pill badge-exhausted">${escapeHtml(formatExhaustedBadge(row.exhausted_resets_at))}</span>`
+    ? `<button type="button" class="pill badge-exhausted badge-exhausted-action" onclick="clearExhaustedCredential('${encodedName}', event)" title="清除耗尽标记">${escapeHtml(formatExhaustedBadge(row.exhausted_resets_at))}</button>`
     : "";
   const failureCount = Number(row.consecutive_failure_count || 0);
   const failure = row.last_failure_code
@@ -889,6 +889,50 @@ async function restoreSelected() {
     body: JSON.stringify({ names }),
   });
   await refreshAll();
+}
+
+function exhaustedNamesFromSelection(names) {
+  const selected = new Set(names);
+  return credState.normal.data
+    .filter((row) => selected.has(row.name) && row.cpa_exhausted)
+    .map((row) => row.name);
+}
+
+async function clearCpaExhausted(names) {
+  return api("api/credentials/cpa-exhausted/clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ names }),
+  });
+}
+
+async function clearExhaustedCredential(name, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const decodedName = decodeURIComponent(name);
+  if (!confirm(`确认清除 ${decodedName} 的耗尽标记吗？`)) return;
+  const data = await clearCpaExhausted([decodedName]);
+  await refreshAll();
+  showToast(`已清除 ${data.cleared ?? 0} 个耗尽标记`);
+}
+
+async function clearSelectedExhausted() {
+  const names = selectedNames("normal");
+  if (names.length === 0) {
+    alert("请先选择至少一个凭证");
+    return;
+  }
+  const exhaustedNames = exhaustedNamesFromSelection(names);
+  if (exhaustedNames.length === 0) {
+    alert("选中凭证没有耗尽标记");
+    return;
+  }
+  if (!confirm(`选中 ${names.length} 个，其中 ${exhaustedNames.length} 个为耗尽凭证。确认清除这些耗尽标记吗？`)) return;
+  const data = await clearCpaExhausted(names);
+  await refreshAll();
+  showToast(`已清除 ${data.cleared ?? 0} 个耗尽标记，跳过 ${data.skipped ?? 0} 个`);
 }
 
 async function deleteCredential(zone, name) {
@@ -1642,6 +1686,8 @@ window.moveBackupRemote = moveBackupRemote;
 window.manualRefresh = manualRefresh;
 window.restoreCredential = restoreCredential;
 window.restoreSelected = restoreSelected;
+window.clearExhaustedCredential = clearExhaustedCredential;
+window.clearSelectedExhausted = clearSelectedExhausted;
 window.deleteCredential = deleteCredential;
 window.deleteSelected = deleteSelected;
 window.downloadCredential = downloadCredential;
