@@ -1073,6 +1073,8 @@ struct CpaConfigResponse {
     inspect_interval_minutes: u64,
     auto_supplement_enabled: bool,
     supplement_target: usize,
+    auto_assign_proxy_enabled: bool,
+    proxy_list: String,
     safety_abort_enabled: bool,
     safety_abort_ratio_percent: u8,
     management_key_set: bool,
@@ -1086,6 +1088,10 @@ struct UpdateCpaConfigRequest {
     inspect_interval_minutes: u64,
     auto_supplement_enabled: bool,
     supplement_target: usize,
+    #[serde(default)]
+    auto_assign_proxy_enabled: Option<bool>,
+    #[serde(default)]
+    proxy_list: Option<String>,
     safety_abort_enabled: bool,
     safety_abort_ratio_percent: u8,
 }
@@ -1098,6 +1104,8 @@ async fn get_cpa_config(State(state): State<Arc<AppState>>) -> Response {
         inspect_interval_minutes: config.inspect_interval_minutes,
         auto_supplement_enabled: config.auto_supplement_enabled,
         supplement_target: config.supplement_target,
+        auto_assign_proxy_enabled: config.auto_assign_proxy_enabled,
+        proxy_list: config.proxy_list,
         safety_abort_enabled: config.safety_abort_enabled,
         safety_abort_ratio_percent: config.safety_abort_ratio_percent,
         management_key_set: !config.management_key.trim().is_empty(),
@@ -1121,6 +1129,10 @@ async fn update_cpa_config(
         inspect_interval_minutes: payload.inspect_interval_minutes,
         auto_supplement_enabled: payload.auto_supplement_enabled,
         supplement_target: payload.supplement_target,
+        auto_assign_proxy_enabled: payload
+            .auto_assign_proxy_enabled
+            .unwrap_or(existing.auto_assign_proxy_enabled),
+        proxy_list: payload.proxy_list.unwrap_or(existing.proxy_list),
         safety_abort_enabled: payload.safety_abort_enabled,
         safety_abort_ratio_percent: payload.safety_abort_ratio_percent,
     };

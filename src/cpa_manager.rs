@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::backup::BackupCoordinator;
 use crate::cpa_client::{CpaAuthEntry, CpaClient};
-use crate::cpa_config::CpaConfig;
+use crate::cpa_config::{CpaConfig, validate_cpa_proxy_list};
 use crate::cpa_log::CpaLog;
 use crate::credential::{CodexCredentialFile, parse_rfc3339};
 use crate::credential_store::{CredentialEntry, CredentialStore, CredentialZone};
@@ -335,22 +335,32 @@ impl CpaManager {
                         .supplement_target
                         .saturating_sub(result.supplement_before);
                     if result.supplement_needed > 0 {
-                        match self
-                            .supplement_from_local(
-                                &client,
-                                result.supplement_needed,
-                                &remaining_active,
-                            )
-                            .await
-                        {
-                            Ok(summary) => {
-                                local_changed |= summary.local_changed;
-                                result.supplement_done = summary.done;
-                                result.supplemented_names = summary.names;
-                                result.errors.extend(summary.errors);
+                        match SupplementProxyAssignment::from_config(cfg) {
+                            Ok(proxy_assignment) => {
+                                match self
+                                    .supplement_from_local(
+                                        &client,
+                                        result.supplement_needed,
+                                        &remaining_active,
+                                        &proxy_assignment,
+                                    )
+                                    .await
+                                {
+                                    Ok(summary) => {
+                                        local_changed |= summary.local_changed;
+                                        result.supplement_done = summary.done;
+                                        result.supplemented_names = summary.names;
+                                        result.errors.extend(summary.errors);
+                                    }
+                                    Err(err) => {
+                                        let message = format!("自动补号失败: {err:#}");
+                                        self.log_best_effort(format!("[ERROR] {message}"));
+                                        result.errors.push(message);
+                                    }
+                                }
                             }
                             Err(err) => {
-                                let message = format!("自动补号失败: {err:#}");
+                                let message = format!("CPA 补号代理配置无效: {err:#}");
                                 self.log_best_effort(format!("[ERROR] {message}"));
                                 result.errors.push(message);
                             }
@@ -576,6 +586,13 @@ impl CpaManager {
                 return self.finish_manual_supplement_result(result);
             }
         };
+        let proxy_assignment = match SupplementProxyAssignment::from_config(cfg) {
+            Ok(proxy_assignment) => proxy_assignment,
+            Err(err) => {
+                result.error = Some(format!("CPA 补号代理配置无效: {err:#}"));
+                return self.finish_manual_supplement_result(result);
+            }
+        };
 
         let remaining = match client.list_codex_files().await {
             Ok(entries) => entries,
@@ -590,7 +607,7 @@ impl CpaManager {
             .collect();
 
         match self
-            .supplement_from_local(&client, requested, &remaining_active)
+            .supplement_from_local(&client, requested, &remaining_active, &proxy_assignment)
             .await
         {
             Ok(summary) => {
@@ -832,6 +849,7 @@ impl CpaManager {
         client: &CpaClient,
         need: usize,
         remaining_active: &[CpaAuthEntry],
+        proxy_assignment: &SupplementProxyAssignment,
     ) -> Result<SupplementSummary> {
         let candidates = self.collect_supplement_candidates(remaining_active)?;
         let mut summary = SupplementSummary {
@@ -849,7 +867,11 @@ impl CpaManager {
             if selected_emails.contains(&candidate.email) {
                 continue;
             }
-            match self.supplement_to_cpa(client, &candidate.key).await {
+            let assigned_proxy_url = proxy_assignment.assigned_proxy(summary.done);
+            match self
+                .supplement_to_cpa(client, &candidate.key, assigned_proxy_url)
+                .await
+            {
                 Ok(outcome) => {
                     summary.local_changed |= outcome.local_changed;
                     if outcome.done {
@@ -889,6 +911,7 @@ impl CpaManager {
         &self,
         client: &CpaClient,
         local_key: &str,
+        assigned_proxy_url: Option<&str>,
     ) -> Result<SupplementOutcome> {
         let activity_guard = self.write_coordinator.lock_activity().await;
         let generation = self.write_coordinator.generation();
@@ -896,9 +919,10 @@ impl CpaManager {
 
         let bytes = self.store.read_bytes(CredentialZone::Normal, local_key)?;
         validate_credential_bytes(&bytes, "待补充的本地凭证")?;
+        let upload_bytes = normalize_cpa_supplement_upload_bytes(&bytes, assigned_proxy_url)?;
         let remote_name = file_name_from_key(local_key);
 
-        client.upload_file(&remote_name, &bytes).await?;
+        client.upload_file(&remote_name, &upload_bytes).await?;
 
         let commit_outcome = {
             let _commit_guard = self.write_coordinator.lock_commit().await;
@@ -1007,6 +1031,29 @@ struct SupplementSummary {
     names: Vec<String>,
     errors: Vec<String>,
     local_changed: bool,
+}
+
+struct SupplementProxyAssignment {
+    enabled: bool,
+    proxies: Vec<String>,
+}
+
+impl SupplementProxyAssignment {
+    fn from_config(cfg: &CpaConfig) -> Result<Self> {
+        Ok(Self {
+            enabled: cfg.auto_assign_proxy_enabled,
+            proxies: validate_cpa_proxy_list(&cfg.proxy_list)?,
+        })
+    }
+
+    fn assigned_proxy(&self, done: usize) -> Option<&str> {
+        if !self.enabled || self.proxies.is_empty() {
+            return None;
+        }
+        self.proxies
+            .get(done % self.proxies.len())
+            .map(String::as_str)
+    }
 }
 
 struct MoveFromCpaOutcome {
@@ -1221,6 +1268,28 @@ fn validate_credential_bytes(bytes: &[u8], source_label: &str) -> Result<CodexCr
         anyhow::bail!("{source_label}缺少 refresh_token");
     }
     Ok(credential)
+}
+
+fn normalize_cpa_supplement_upload_bytes(
+    bytes: &[u8],
+    assigned_proxy_url: Option<&str>,
+) -> Result<Vec<u8>> {
+    let mut value: Value =
+        serde_json::from_slice(bytes).context("待补充的本地凭证不是有效 JSON")?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("待补充的本地凭证必须是 JSON 对象"))?;
+    if object.get("disabled") == Some(&Value::Bool(true)) {
+        object.insert("disabled".to_string(), Value::Bool(false));
+    }
+    object.remove("disabled_until");
+    if let Some(proxy_url) = assigned_proxy_url {
+        object.insert(
+            "proxy_url".to_string(),
+            Value::String(proxy_url.to_string()),
+        );
+    }
+    serde_json::to_vec(&value).context("failed to serialize CPA supplement upload JSON")
 }
 
 fn select_supplement_candidates(
@@ -1622,6 +1691,142 @@ mod tests {
     }
 
     #[test]
+    fn supplement_upload_normalization_enables_disabled_credential() {
+        let raw = serde_json::json!({
+            "type": "codex",
+            "refresh_token": "refresh",
+            "disabled": true,
+            "disabled_until": "2030-01-01T00:00:00Z"
+        });
+
+        let normalized = normalize_upload_json(&raw, None);
+
+        assert_eq!(normalized.get("disabled"), Some(&Value::Bool(false)));
+        assert!(normalized.get("disabled_until").is_none());
+    }
+
+    #[test]
+    fn supplement_upload_normalization_keeps_disabled_false() {
+        let raw = serde_json::json!({
+            "type": "codex",
+            "refresh_token": "refresh",
+            "disabled": false
+        });
+
+        let normalized = normalize_upload_json(&raw, None);
+
+        assert_eq!(normalized.get("disabled"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn supplement_upload_normalization_does_not_add_missing_disabled() {
+        let raw = serde_json::json!({
+            "type": "codex",
+            "refresh_token": "refresh"
+        });
+
+        let normalized = normalize_upload_json(&raw, None);
+
+        assert!(normalized.get("disabled").is_none());
+    }
+
+    #[test]
+    fn supplement_upload_normalization_rejects_non_object_json() {
+        let raw = serde_json::to_vec(&serde_json::json!(["not-object"])).unwrap();
+
+        assert!(normalize_cpa_supplement_upload_bytes(&raw, None).is_err());
+    }
+
+    #[test]
+    fn supplement_upload_normalization_writes_assigned_proxy_url() {
+        let raw = serde_json::json!({
+            "type": "codex",
+            "refresh_token": "refresh"
+        });
+
+        let normalized = normalize_upload_json(&raw, Some("socks5h://127.0.0.1:10808"));
+
+        assert_eq!(
+            normalized.get("proxy_url").and_then(Value::as_str),
+            Some("socks5h://127.0.0.1:10808")
+        );
+    }
+
+    #[test]
+    fn supplement_upload_normalization_preserves_existing_proxy_without_assignment() {
+        let raw = serde_json::json!({
+            "type": "codex",
+            "refresh_token": "refresh",
+            "proxy_url": "https://proxy.example.com"
+        });
+
+        let normalized = normalize_upload_json(&raw, None);
+
+        assert_eq!(
+            normalized.get("proxy_url").and_then(Value::as_str),
+            Some("https://proxy.example.com")
+        );
+    }
+
+    #[test]
+    fn supplement_proxy_assignment_disabled_or_empty_returns_none() {
+        let disabled = SupplementProxyAssignment {
+            enabled: false,
+            proxies: vec!["socks5h://127.0.0.1:10808".to_string()],
+        };
+        let empty = SupplementProxyAssignment {
+            enabled: true,
+            proxies: Vec::new(),
+        };
+
+        assert_eq!(disabled.assigned_proxy(0), None);
+        assert_eq!(empty.assigned_proxy(0), None);
+    }
+
+    #[test]
+    fn supplement_proxy_assignment_reuses_single_proxy() {
+        let assignment = SupplementProxyAssignment {
+            enabled: true,
+            proxies: vec!["socks5h://127.0.0.1:10808".to_string()],
+        };
+
+        assert_eq!(
+            (0..3)
+                .map(|done| assignment.assigned_proxy(done).unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "socks5h://127.0.0.1:10808",
+                "socks5h://127.0.0.1:10808",
+                "socks5h://127.0.0.1:10808"
+            ]
+        );
+    }
+
+    #[test]
+    fn supplement_proxy_assignment_round_robins_by_success_count() {
+        let assignment = SupplementProxyAssignment {
+            enabled: true,
+            proxies: vec![
+                "socks5h://us1:1080".to_string(),
+                "socks5h://jp1:1080".to_string(),
+                "socks5h://sg1:1080".to_string(),
+            ],
+        };
+
+        assert_eq!(
+            (0..4)
+                .map(|done| assignment.assigned_proxy(done).unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "socks5h://us1:1080",
+                "socks5h://jp1:1080",
+                "socks5h://sg1:1080",
+                "socks5h://us1:1080"
+            ]
+        );
+    }
+
+    #[test]
     fn supplement_candidates_keep_same_email_fallbacks_and_count_unique_accounts() {
         let entries = vec![
             make_entry(
@@ -1688,6 +1893,14 @@ mod tests {
             ]
         );
         assert_eq!(count_supplement_candidate_accounts(&selected), 2);
+    }
+
+    fn normalize_upload_json(raw: &Value, assigned_proxy_url: Option<&str>) -> Value {
+        let bytes = serde_json::to_vec(raw).unwrap();
+        serde_json::from_slice(
+            &normalize_cpa_supplement_upload_bytes(&bytes, assigned_proxy_url).unwrap(),
+        )
+        .unwrap()
     }
 
     fn make_entry(key: &str, email: Option<&str>, refresh_token: Option<&str>) -> CredentialEntry {

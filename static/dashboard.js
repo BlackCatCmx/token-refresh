@@ -1405,6 +1405,8 @@ async function loadCpaConfig() {
   document.getElementById("cpa-inspect-interval").value = data.inspect_interval_minutes ?? 60;
   document.getElementById("cpa-auto-supplement-enabled").checked = Boolean(data.auto_supplement_enabled);
   document.getElementById("cpa-supplement-target").value = data.supplement_target ?? 50;
+  document.getElementById("cpa-auto-assign-proxy-enabled").checked = Boolean(data.auto_assign_proxy_enabled);
+  document.getElementById("cpa-proxy-list").value = data.proxy_list || "";
   document.getElementById("cpa-safety-abort-enabled").checked = Boolean(data.safety_abort_enabled);
   document.getElementById("cpa-safety-abort-ratio").value = data.safety_abort_ratio_percent ?? 50;
 }
@@ -1421,6 +1423,8 @@ async function saveCpaConfig() {
         inspect_interval_minutes: Number(document.getElementById("cpa-inspect-interval").value),
         auto_supplement_enabled: document.getElementById("cpa-auto-supplement-enabled").checked,
         supplement_target: Number(document.getElementById("cpa-supplement-target").value),
+        auto_assign_proxy_enabled: document.getElementById("cpa-auto-assign-proxy-enabled").checked,
+        proxy_list: document.getElementById("cpa-proxy-list").value,
         safety_abort_enabled: document.getElementById("cpa-safety-abort-enabled").checked,
         safety_abort_ratio_percent: Number(document.getElementById("cpa-safety-abort-ratio").value),
       }),

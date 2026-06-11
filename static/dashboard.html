@@ -193,6 +193,12 @@
               <input type="number" id="cpa-supplement-target" min="1">
             </div>
           </div>
+          <div class="sub-card sub-card--stack">
+            <span class="sub-card-tag">补号代理</span>
+            <label class="checkbox-row"><input type="checkbox" id="cpa-auto-assign-proxy-enabled"> 自动分配代理</label>
+            <label for="cpa-proxy-list">补号代理列表</label>
+            <textarea id="cpa-proxy-list" rows="4" placeholder="一行一个代理 URL，例如 socks5h://127.0.0.1:10808"></textarea>
+          </div>
         </div>
         <div class="toolbar toolbar-top">
           <button type="button" onclick="saveCpaConfig()">保存配置</button>

@@ -922,6 +922,29 @@ pre {
   width: 72px;
 }
 
+.sub-card--stack {
+  display: grid;
+  gap: 10px;
+}
+
+.sub-card--stack .sub-card-tag {
+  width: 100%;
+  border-right: 0;
+  border-bottom: 1px solid #e2e8f0;
+  padding-right: 0;
+  padding-bottom: 8px;
+}
+
+.sub-card--stack label:not(.checkbox-row) {
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+}
+
+.sub-card--stack textarea {
+  min-height: 112px;
+}
+
 .cred-pager {
   display: flex;
   align-items: center;
