@@ -854,17 +854,82 @@ pre {
 
 /* ── CPA Config Header ── */
 .cpa-config-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   margin-bottom: 14px;
 }
 
 .cpa-config-header h2 { margin: 0; }
 
-/* CPA connection fields: URL(2fr) Key(2fr) Interval(1fr) */
-.cpa-conn-grid {
-  grid-template-columns: 2fr 2fr 1fr;
+.cpa-config-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.cpa-config-left {
+  display: grid;
+  gap: 12px;
+}
+
+.cpa-form-row {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.cpa-form-row > label:not(.checkbox-row) {
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+}
+
+.cpa-form-row--switch {
+  min-height: 48px;
+  align-content: center;
+}
+
+.cpa-form-row--inline {
+  grid-template-columns: 92px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+}
+
+.cpa-form-row-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.cpa-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.cpa-inline-field label {
+  font-size: 13px;
+  color: #475569;
+}
+
+.cpa-inline-field input {
+  width: 96px;
+}
+
+.cpa-proxy-card {
+  grid-template-rows: auto auto auto minmax(220px, 1fr);
+}
+
+.cpa-proxy-card textarea {
+  height: 100%;
 }
 
 .sub-card-grid {
@@ -1063,7 +1128,17 @@ details.settings-group-collapsible > .grid { margin-top: 4px; }
   .cpa-status-tiles { grid-template-columns: repeat(2, 1fr); }
   .cpa-tile--wide { grid-column: span 1; }
   .cpa-tile--full { grid-column: 1 / -1; }
-  .cpa-conn-grid { grid-template-columns: 1fr; }
+  .cpa-config-layout { grid-template-columns: 1fr; }
+  .cpa-form-row--inline {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+  .cpa-inline-field {
+    width: 100%;
+    justify-self: stretch;
+    justify-content: space-between;
+    white-space: normal;
+  }
   .sub-card--row { flex-wrap: wrap; align-items: flex-start; gap: 10px; }
   .sub-card-tag {
     width: 100%;

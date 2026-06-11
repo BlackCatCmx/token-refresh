@@ -165,35 +165,43 @@
       <section class="full-width">
         <div class="cpa-config-header">
           <h2>CPA 连接配置</h2>
-          <label class="checkbox-row"><input type="checkbox" id="cpa-enabled"> 开启自动巡查</label>
         </div>
-        <div class="grid cpa-conn-grid">
-          <div><label>CLIProxyAPI Base URL</label><input type="text" id="cpa-base-url" placeholder="http://host:8317"></div>
-          <div>
-            <label>管理 Key</label>
-            <input type="password" id="cpa-management-key" autocomplete="new-password" placeholder="留空表示保持不变">
-            <div id="cpa-management-key-meta" class="muted"></div>
-          </div>
-          <div><label>巡查间隔（分钟）</label><input type="number" id="cpa-inspect-interval" min="1"></div>
-        </div>
-        <div class="sub-card-grid">
-          <div class="sub-card sub-card--row">
-            <span class="sub-card-tag">安全保护</span>
-            <label class="checkbox-row"><input type="checkbox" id="cpa-safety-abort-enabled"> 启用异常占比保护</label>
-            <div class="sub-card-field">
-              <label for="cpa-safety-abort-ratio">占比阈值（%）</label>
-              <input type="number" id="cpa-safety-abort-ratio" min="1" max="100">
+        <div class="cpa-config-layout">
+          <div class="cpa-config-left">
+            <div class="cpa-form-row cpa-form-row--switch">
+              <label class="checkbox-row"><input type="checkbox" id="cpa-enabled"> 开启自动巡查</label>
+            </div>
+            <div class="cpa-form-row">
+              <label for="cpa-base-url">CLIProxyAPI Base URL</label>
+              <input type="text" id="cpa-base-url" placeholder="http://host:8317">
+            </div>
+            <div class="cpa-form-row">
+              <label for="cpa-management-key">管理 Key</label>
+              <input type="password" id="cpa-management-key" autocomplete="new-password" placeholder="留空表示保持不变">
+              <div id="cpa-management-key-meta" class="muted"></div>
+            </div>
+            <div class="cpa-form-row">
+              <label for="cpa-inspect-interval">巡查间隔（分钟）</label>
+              <input type="number" id="cpa-inspect-interval" min="1">
+            </div>
+            <div class="cpa-form-row cpa-form-row--inline">
+              <span class="cpa-form-row-title">安全保护</span>
+              <label class="checkbox-row"><input type="checkbox" id="cpa-safety-abort-enabled"> 启用异常占比保护</label>
+              <div class="cpa-inline-field">
+                <label for="cpa-safety-abort-ratio">占比阈值（%）</label>
+                <input type="number" id="cpa-safety-abort-ratio" min="1" max="100">
+              </div>
+            </div>
+            <div class="cpa-form-row cpa-form-row--inline">
+              <span class="cpa-form-row-title">自动补号</span>
+              <label class="checkbox-row"><input type="checkbox" id="cpa-auto-supplement-enabled"> 开启自动补号</label>
+              <div class="cpa-inline-field">
+                <label for="cpa-supplement-target">目标数量</label>
+                <input type="number" id="cpa-supplement-target" min="1">
+              </div>
             </div>
           </div>
-          <div class="sub-card sub-card--row">
-            <span class="sub-card-tag">自动补号</span>
-            <label class="checkbox-row"><input type="checkbox" id="cpa-auto-supplement-enabled"> 开启自动补号</label>
-            <div class="sub-card-field">
-              <label for="cpa-supplement-target">目标数量</label>
-              <input type="number" id="cpa-supplement-target" min="1">
-            </div>
-          </div>
-          <div class="sub-card sub-card--stack">
+          <div class="sub-card sub-card--stack cpa-proxy-card">
             <span class="sub-card-tag">补号代理</span>
             <label class="checkbox-row"><input type="checkbox" id="cpa-auto-assign-proxy-enabled"> 自动分配代理</label>
             <label for="cpa-proxy-list">补号代理列表</label>
