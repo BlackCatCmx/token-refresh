@@ -1078,6 +1078,10 @@ const backupRunState = {
   selectedIndex: null,
 };
 
+const migrationImportState = {
+  needsPassword: false,
+};
+
 async function openBackupRunModal() {
   try {
     await loadBackupStatus();
@@ -1266,6 +1270,127 @@ async function submitBackupRestore() {
       setBackupRestorePasswordRequired(true);
       syncBackupRestoreConfirm();
       document.getElementById("backup-restore-password").focus();
+      return;
+    }
+    alert(error.message);
+  }
+}
+
+function openMigrationExportModal() {
+  document.getElementById("migration-export-confirmation").value = "";
+  syncMigrationExportConfirm();
+  const modal = document.getElementById("migration-export-modal");
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+}
+
+function closeMigrationExportModal() {
+  document.getElementById("migration-export-confirmation").value = "";
+  const modal = document.getElementById("migration-export-modal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function syncMigrationExportConfirm() {
+  const enabled = document.getElementById("migration-export-confirmation").value.trim() === "确定导出迁移包";
+  document.getElementById("migration-export-submit").disabled = !enabled;
+}
+
+async function submitMigrationExport() {
+  const confirmation = document.getElementById("migration-export-confirmation").value.trim();
+  if (confirmation !== "确定导出迁移包") {
+    alert("请输入“确定导出迁移包”后再继续");
+    return;
+  }
+  try {
+    const response = await api("api/migration/export.zip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation }),
+    });
+    await downloadBlobResponse(response, "token-refresh-migration.zip");
+    closeMigrationExportModal();
+    await loadScheduler();
+    showToast("迁移包已导出，当前环境自动刷新已停止");
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function openMigrationImportModal() {
+  migrationImportState.needsPassword = false;
+  document.getElementById("migration-import-file").value = "";
+  document.getElementById("migration-import-confirmation").value = "";
+  document.getElementById("migration-import-password").value = "";
+  setMigrationImportPasswordRequired(false);
+  syncMigrationImportConfirm();
+  const modal = document.getElementById("migration-import-modal");
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+}
+
+function closeMigrationImportModal() {
+  migrationImportState.needsPassword = false;
+  document.getElementById("migration-import-file").value = "";
+  document.getElementById("migration-import-confirmation").value = "";
+  document.getElementById("migration-import-password").value = "";
+  setMigrationImportPasswordRequired(false);
+  const modal = document.getElementById("migration-import-modal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function setMigrationImportPasswordRequired(required) {
+  migrationImportState.needsPassword = required;
+  const group = document.getElementById("migration-import-password-group");
+  const hint = document.getElementById("migration-import-password-hint");
+  group.classList.toggle("hidden", !required);
+  hint.textContent = required
+    ? "当前 WEB_PASSWORD 无法解密该迁移包，请输入旧环境导出时使用的密码"
+    : "留空时使用当前 WEB_PASSWORD";
+  hint.classList.toggle("danger-text", required);
+  hint.classList.toggle("muted", !required);
+}
+
+function syncMigrationImportConfirm() {
+  const file = document.getElementById("migration-import-file").files[0];
+  const password = document.getElementById("migration-import-password").value.trim();
+  const enabled = Boolean(file)
+    && document.getElementById("migration-import-confirmation").value.trim() === "确定导入迁移包"
+    && (!migrationImportState.needsPassword || password.length > 0);
+  document.getElementById("migration-import-submit").disabled = !enabled;
+}
+
+async function submitMigrationImport() {
+  const file = document.getElementById("migration-import-file").files[0];
+  if (!file) {
+    alert("请选择迁移 ZIP");
+    return;
+  }
+  const confirmation = document.getElementById("migration-import-confirmation").value.trim();
+  if (confirmation !== "确定导入迁移包") {
+    alert("请输入“确定导入迁移包”后再继续");
+    return;
+  }
+  const password = document.getElementById("migration-import-password").value.trim();
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("confirmation", confirmation);
+  if (password) form.append("password", password);
+  try {
+    const data = await api("api/migration/import", { method: "POST", body: form });
+    closeMigrationImportModal();
+    await refreshAll();
+    showToast(`迁移导入完成：正常区 ${data.normal_count}，异常区 ${data.abnormal_count}`);
+  } catch (error) {
+    if (error.code === "migration_password_invalid") {
+      setMigrationImportPasswordRequired(true);
+      syncMigrationImportConfirm();
+      document.getElementById("migration-import-password").focus();
       return;
     }
     alert(error.message);

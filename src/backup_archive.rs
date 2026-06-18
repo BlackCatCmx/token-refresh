@@ -387,25 +387,29 @@ fn validate_snapshot_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_relative_key(key: &str) -> Result<PathBuf> {
+pub(crate) fn validate_archive_relative_key(key: &str) -> Result<PathBuf> {
     let normalized = key.replace('\\', "/").trim_start_matches('/').to_string();
     if normalized.is_empty() {
-        bail!("snapshot entry key cannot be empty");
+        bail!("archive entry key cannot be empty");
     }
     let path = PathBuf::from(&normalized);
     if path.is_absolute() {
-        bail!("snapshot entry key must be relative");
+        bail!("archive entry key must be relative");
     }
     for component in path.components() {
         match component {
             Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir => bail!("snapshot entry key cannot contain parent directory"),
+            Component::ParentDir => bail!("archive entry key cannot contain parent directory"),
             Component::RootDir | Component::Prefix(_) => {
-                bail!("snapshot entry key must be relative")
+                bail!("archive entry key must be relative")
             }
         }
     }
     Ok(path)
+}
+
+fn validate_relative_key(key: &str) -> Result<PathBuf> {
+    validate_archive_relative_key(key)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

@@ -475,6 +475,17 @@ impl ConfigManager {
         guard.locked_fields = locked_fields;
         Ok(effective_config)
     }
+
+    pub async fn validate_settings_update(&self, settings: &EditableSettings) -> Result<AppConfig> {
+        let guard = self.inner.read().await;
+        reject_locked_field_updates(&guard.locked_fields, settings, &guard.effective_config)?;
+        let mut updated = guard.persisted_config.clone();
+        apply_editable_settings(&mut updated, settings.clone());
+        validate_config(&updated)?;
+        let (effective_config, _) = apply_env_overrides(updated)?;
+        validate_config(&effective_config)?;
+        Ok(effective_config)
+    }
 }
 
 pub fn header_preview(config: &AppConfig) -> Result<BTreeMap<String, String>> {

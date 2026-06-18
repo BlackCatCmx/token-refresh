@@ -82,6 +82,8 @@
           <button type="button" class="secondary" onclick="downloadCredentialArchive('abnormal')">下载异常区 ZIP</button>
           <button type="button" id="backup-run-btn" onclick="openBackupRunModal()">立即备份</button>
           <button type="button" class="warn" id="backup-restore-open-btn" onclick="openBackupRestoreModal()">从备份还原</button>
+          <button type="button" class="secondary" onclick="openMigrationExportModal()">导出迁移包</button>
+          <button type="button" class="warn" onclick="openMigrationImportModal()">导入迁移包</button>
           <button type="button" class="secondary" onclick="fillMissingUserAgents()">补充缺失 UA</button>
           <button type="button" class="secondary" onclick="reassignCliVersions()">重配UA-cx版本</button>
           <button type="button" class="warn" onclick="reassignAllUserAgents()">重配UA-全量</button>
@@ -374,6 +376,57 @@
       <div class="modal-footer">
         <button type="button" class="secondary" onclick="closeBackupRestoreModal()">取消</button>
         <button type="button" class="danger" id="backup-restore-submit" onclick="submitBackupRestore()" disabled>确认还原</button>
+      </div>
+    </div>
+  </div>
+  <div id="migration-export-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" onclick="closeMigrationExportModal()"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="migration-export-title">
+      <div class="modal-header">
+        <div>
+          <h2 id="migration-export-title">导出迁移包</h2>
+          <div class="muted">迁移包包含凭证、凭证状态、设置、备份端配置和 CPA 非连接类设置。</div>
+        </div>
+        <button type="button" class="secondary modal-close" aria-label="关闭" onclick="closeMigrationExportModal()">X</button>
+      </div>
+      <div class="backup-restore-warnings">
+        <div>导出会停止当前环境自动刷新，并用当前 WEB_PASSWORD 加密迁移包。</div>
+        <div>CPA Base URL 和管理 Key 不会写入迁移包，导入后需要重新配置连接信息。</div>
+      </div>
+      <label class="backup-warning-label" for="migration-export-confirmation">请输入 <strong>确定导出迁移包</strong> 才能继续</label>
+      <input id="migration-export-confirmation" type="text" class="backup-confirm-input" oninput="syncMigrationExportConfirm()">
+      <div class="modal-footer">
+        <button type="button" class="secondary" onclick="closeMigrationExportModal()">取消</button>
+        <button type="button" class="danger" id="migration-export-submit" onclick="submitMigrationExport()" disabled>确认导出</button>
+      </div>
+    </div>
+  </div>
+  <div id="migration-import-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" onclick="closeMigrationImportModal()"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="migration-import-title">
+      <div class="modal-header">
+        <div>
+          <h2 id="migration-import-title">导入迁移包</h2>
+          <div class="muted">这会覆盖当前凭证、凭证状态、设置、备份端配置和 CPA 非连接类设置。</div>
+        </div>
+        <button type="button" class="secondary modal-close" aria-label="关闭" onclick="closeMigrationImportModal()">X</button>
+      </div>
+      <div class="backup-restore-warnings">
+        <div>导入成功后自动刷新保持关闭，需要检查后手动开启。</div>
+        <div>导入会恢复迁移包中的 S3 Secret Key，并清空 CPA Base URL 和管理 Key。</div>
+      </div>
+      <label class="backup-password-label" for="migration-import-file">迁移 ZIP</label>
+      <input id="migration-import-file" type="file" accept=".zip" class="backup-confirm-input" onchange="syncMigrationImportConfirm()">
+      <div id="migration-import-password-group" class="backup-password-group hidden">
+        <label class="backup-password-label" for="migration-import-password">迁移包密码</label>
+        <input id="migration-import-password" type="password" class="backup-confirm-input" autocomplete="current-password" oninput="syncMigrationImportConfirm()">
+        <div id="migration-import-password-hint" class="muted backup-password-hint">留空时使用当前 WEB_PASSWORD</div>
+      </div>
+      <label class="backup-warning-label" for="migration-import-confirmation">请输入 <strong>确定导入迁移包</strong> 才能继续</label>
+      <input id="migration-import-confirmation" type="text" class="backup-confirm-input" oninput="syncMigrationImportConfirm()">
+      <div class="modal-footer">
+        <button type="button" class="secondary" onclick="closeMigrationImportModal()">取消</button>
+        <button type="button" class="danger" id="migration-import-submit" onclick="submitMigrationImport()" disabled>确认导入</button>
       </div>
     </div>
   </div>

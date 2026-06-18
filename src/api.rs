@@ -25,6 +25,7 @@ use crate::import::{
     patch_user_agents,
 };
 use crate::logging::LogKind;
+use crate::migration_archive::{self, MigrationArchiveInput, MigrationRestoreSummary};
 use crate::web::{AppState, app_css, dashboard_js, dashboard_page, login_js, login_page};
 
 const LOG_LINE_LIMIT: usize = 50;
@@ -70,6 +71,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/credentials/archive-selected.zip",
             post(download_selected_credential_archive),
         )
+        .route("/api/migration/export.zip", post(export_migration_zip))
+        .route("/api/migration/import", post(import_migration_zip))
         .route("/api/backup/status", get(get_backup_status))
         .route("/api/backup/snapshots", get(list_backup_snapshots))
         .route("/api/backup/run", post(run_backup_now))
@@ -811,6 +814,235 @@ async fn download_selected_credential_archive(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ExportMigrationRequest {
+    confirmation: String,
+}
+
+#[derive(Debug)]
+struct ImportMigrationPayload {
+    bytes: Vec<u8>,
+    confirmation: String,
+    password: Option<String>,
+}
+
+async fn export_migration_zip(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ExportMigrationRequest>,
+) -> Response {
+    if payload.confirmation.trim() != "确定导出迁移包" {
+        return json_error(StatusCode::BAD_REQUEST, "请输入“确定导出迁移包”后再继续");
+    }
+    match export_migration_archive(&state).await {
+        Ok((bytes, file_name)) => download_response("application/zip", file_name, bytes),
+        Err(err) => json_error(migration_error_status(&err), &err.to_string()),
+    }
+}
+
+async fn import_migration_zip(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Response {
+    let payload = match collect_migration_import_payload(&mut multipart).await {
+        Ok(payload) => payload,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    };
+    if payload.confirmation.trim() != "确定导入迁移包" {
+        return json_error(StatusCode::BAD_REQUEST, "请输入“确定导入迁移包”后再继续");
+    }
+    let password = payload
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or(state.config_manager.web_password().await);
+    match restore_migration_archive_from_bytes(&state, &payload.bytes, &password).await {
+        Ok(summary) => Json(summary).into_response(),
+        Err(err) if migration_archive::is_invalid_migration_password(&err) => json_error_with_code(
+            StatusCode::BAD_REQUEST,
+            "迁移包密码错误",
+            "migration_password_invalid",
+        ),
+        Err(err) => json_error(migration_error_status(&err), &err.to_string()),
+    }
+}
+
+async fn export_migration_archive(state: &AppState) -> Result<(Vec<u8>, String)> {
+    let scheduler_status = state.scheduler.status().await;
+    if scheduler_status.manual_running || scheduler_status.manual_pending {
+        anyhow::bail!("手动全量刷新正在执行中，请等待其完成后重试");
+    }
+    state.scheduler.stop().await?;
+    let _activity_guard = state.write_coordinator.lock_activity().await;
+    let _commit_guard = state.write_coordinator.lock_commit().await;
+    let normal_files = collect_zone_file_bytes(&state.store, CredentialZone::Normal)?;
+    let abnormal_files = collect_zone_file_bytes(&state.store, CredentialZone::Abnormal)?;
+    let status_records = state.status_store.all()?;
+    let effective_config = state.config_manager.effective_config().await;
+    let editable_settings = EditableSettings::from(&effective_config);
+    let cpa_config = state.cpa_config.get();
+    let created_at = chrono::Utc::now();
+    let bytes = migration_archive::build_migration_archive(
+        MigrationArchiveInput {
+            normal_files,
+            abnormal_files,
+            status_records,
+            editable_settings,
+            cpa_config,
+        },
+        created_at,
+        &state.config_manager.web_password().await,
+    )?;
+    let file_name = format!(
+        "token-refresh-migration-{}.zip",
+        created_at.format("%Y%m%dT%H%M%SZ")
+    );
+    let _ = state.logger.runtime(
+        "info",
+        format!("migration archive exported bytes={}", bytes.len()),
+    );
+    Ok((bytes, file_name))
+}
+
+async fn restore_migration_archive_from_bytes(
+    state: &AppState,
+    bytes: &[u8],
+    password: &str,
+) -> Result<MigrationRestoreSummary> {
+    let parsed = migration_archive::parse_migration_archive(bytes, password)?;
+    state
+        .config_manager
+        .validate_settings_update(&parsed.editable_settings)
+        .await?;
+    let cpa_config = migration_archive::sanitize_cpa_config(parsed.cpa_config.clone()).normalized();
+    cpa_config.validate()?;
+
+    let scheduler_status = state.scheduler.status().await;
+    if scheduler_status.manual_running || scheduler_status.manual_pending {
+        anyhow::bail!("手动全量刷新正在执行中，请等待其完成后重试");
+    }
+    let previous_scheduler_enabled = state.scheduler.persisted_enabled()?;
+    let _activity_guard = state.write_coordinator.lock_activity().await;
+    let freeze_guard = state.write_coordinator.begin_restore()?;
+    state.scheduler.pause().await;
+    let result = async {
+        let _commit_guard = state.write_coordinator.lock_commit().await;
+        let summary = migration_archive::restore_migration_archive(
+            &state.store,
+            &state.status_store,
+            &parsed,
+        )?;
+        let updated_config = state
+            .config_manager
+            .update_settings(parsed.editable_settings)
+            .await?;
+        state.cpa_config.set(cpa_config)?;
+        parse_byte_size_str(&updated_config.logging.max_file_size).and_then(|size| {
+            state.logger.update_max_file_size(size)?;
+            state.logger.update_runtime_level(&updated_config.log_level)
+        })?;
+        Ok::<MigrationRestoreSummary, anyhow::Error>(summary)
+    }
+    .await;
+    drop(freeze_guard);
+
+    let import_committed = result.is_ok();
+    let result = if import_committed {
+        state.scheduler.clear_backoff().await;
+        match state.scheduler.stop().await {
+            Ok(()) => {
+                state.scheduler.wake();
+                state.cpa_scheduler.wake();
+                result
+            }
+            Err(err) => Err(err),
+        }
+    } else {
+        if previous_scheduler_enabled {
+            state.scheduler.resume().await;
+        }
+        result
+    };
+
+    match &result {
+        Ok(summary) => {
+            let _ = state.logger.runtime(
+                "info",
+                format!(
+                    "migration import completed normal_count={} abnormal_count={} status_count={}",
+                    summary.normal_count, summary.abnormal_count, summary.status_count
+                ),
+            );
+        }
+        Err(err) => {
+            let _ = state
+                .logger
+                .runtime("error", format!("migration import failed: {err:#}"));
+        }
+    }
+    result
+}
+
+fn collect_zone_file_bytes(
+    store: &CredentialStore,
+    zone: CredentialZone,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    for entry in store.scan_zone(zone)? {
+        files.insert(entry.key.clone(), store.read_bytes(zone, &entry.key)?);
+    }
+    Ok(files)
+}
+
+async fn collect_migration_import_payload(
+    multipart: &mut Multipart,
+) -> Result<ImportMigrationPayload> {
+    let mut bytes = None;
+    let mut confirmation = None;
+    let mut password = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .context("failed to read upload field")?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "file" => {
+                bytes = Some(
+                    field
+                        .bytes()
+                        .await
+                        .context("failed to read uploaded migration ZIP")?
+                        .to_vec(),
+                );
+            }
+            "confirmation" => {
+                confirmation = Some(
+                    field
+                        .text()
+                        .await
+                        .context("failed to read migration confirmation")?,
+                );
+            }
+            "password" => {
+                password = Some(
+                    field
+                        .text()
+                        .await
+                        .context("failed to read migration password")?,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(ImportMigrationPayload {
+        bytes: bytes.context("未上传迁移 ZIP 文件")?,
+        confirmation: confirmation.unwrap_or_default(),
+        password,
+    })
+}
+
 async fn start_scheduler(State(state): State<Arc<AppState>>) -> Response {
     match state.scheduler.start().await {
         Ok(()) => {
@@ -1427,6 +1659,19 @@ fn backup_error_status(error: &anyhow::Error) -> StatusCode {
         StatusCode::CONFLICT
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+fn migration_error_status(error: &anyhow::Error) -> StatusCode {
+    let message = error.to_string();
+    if message.contains("正在执行")
+        || message.contains("从备份还原")
+        || message.contains("请等待其完成")
+        || message.contains("当前已有")
+    {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
     }
 }
 
