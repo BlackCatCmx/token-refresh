@@ -170,6 +170,10 @@
           <div class="cpa-config-left">
             <div class="cpa-form-row cpa-form-row--switch">
               <label class="checkbox-row"><input type="checkbox" id="cpa-enabled"> 开启自动巡查</label>
+              <div class="cpa-test-control">
+                <button type="button" class="secondary" id="cpa-test-btn" onclick="testCpaConnection()">测试</button>
+                <span id="cpa-test-result" class="cpa-test-result" aria-live="polite"></span>
+              </div>
             </div>
             <div class="cpa-form-row">
               <label for="cpa-base-url">CLIProxyAPI Base URL</label>

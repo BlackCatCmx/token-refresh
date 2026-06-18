@@ -1409,6 +1409,7 @@ async function loadCpaConfig() {
   document.getElementById("cpa-proxy-list").value = data.proxy_list || "";
   document.getElementById("cpa-safety-abort-enabled").checked = Boolean(data.safety_abort_enabled);
   document.getElementById("cpa-safety-abort-ratio").value = data.safety_abort_ratio_percent ?? 50;
+  renderCpaTestResult(null);
 }
 
 async function saveCpaConfig() {
@@ -1433,6 +1434,50 @@ async function saveCpaConfig() {
     showToast("CPA 配置已保存");
   } catch (error) {
     showToast(error.message, "error", 4500);
+  }
+}
+
+function renderCpaTestResult(result) {
+  const container = document.getElementById("cpa-test-result");
+  if (!container) return;
+  container.className = "cpa-test-result";
+  container.textContent = "";
+  if (!result) return;
+  container.classList.add(result.ok ? "cpa-test-result--ok" : "cpa-test-result--error");
+  container.textContent = result.status_code == null ? "ERR" : String(result.status_code);
+  container.title = result.message || "";
+}
+
+async function testCpaConnection() {
+  const btn = document.getElementById("cpa-test-btn");
+  renderCpaTestResult(null);
+  btn.disabled = true;
+  btn.classList.add("loading");
+  try {
+    const managementKey = document.getElementById("cpa-management-key").value;
+    const payload = {
+      base_url: document.getElementById("cpa-base-url").value,
+    };
+    if (managementKey.trim()) {
+      payload.management_key = managementKey;
+    }
+    const data = await api("api/cpa/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    renderCpaTestResult(data);
+  } catch (error) {
+    renderCpaTestResult({
+      ok: false,
+      status_code: null,
+      message: error.message,
+    });
+  } finally {
+    if (btn.isConnected) {
+      btn.disabled = false;
+      btn.classList.remove("loading");
+    }
   }
 }
 
@@ -1705,6 +1750,7 @@ window.fillMissingUserAgents = fillMissingUserAgents;
 window.reassignCliVersions = reassignCliVersions;
 window.reassignAllUserAgents = reassignAllUserAgents;
 window.saveCpaConfig = saveCpaConfig;
+window.testCpaConnection = testCpaConnection;
 window.runCpaReclaimAll = runCpaReclaimAll;
 window.runCpaInspectOnce = runCpaInspectOnce;
 window.openCpaSupplementModal = openCpaSupplementModal;
@@ -1734,6 +1780,8 @@ window.goCredPage = goCredPage;
 window.switchTab = switchTab;
 
 document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("cpa-base-url")?.addEventListener("input", () => renderCpaTestResult(null));
+  document.getElementById("cpa-management-key")?.addEventListener("input", () => renderCpaTestResult(null));
   refreshAll().catch((error) => alert(error.message));
 });
 

@@ -16,6 +16,7 @@ use crate::archive;
 use crate::backup::RestoreResult;
 use crate::backup_archive;
 use crate::config::{EditableSettings, parse_byte_size_str};
+use crate::cpa_client::CpaClient;
 use crate::cpa_config::CpaConfig;
 use crate::credential::CodexCredentialFile;
 use crate::credential_store::{CredentialStore, CredentialZone};
@@ -87,6 +88,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/cpa/config",
             get(get_cpa_config).put(update_cpa_config),
         )
+        .route("/api/cpa/test", post(test_cpa_connection))
         .route("/api/cpa/status", get(get_cpa_status))
         .route("/api/cpa/reclaim-all", post(run_cpa_reclaim_all))
         .route("/api/cpa/inspect-once", post(run_cpa_inspect_once))
@@ -1096,6 +1098,20 @@ struct UpdateCpaConfigRequest {
     safety_abort_ratio_percent: u8,
 }
 
+#[derive(Debug, Deserialize)]
+struct TestCpaConnectionRequest {
+    base_url: String,
+    #[serde(default)]
+    management_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestCpaConnectionResponse {
+    ok: bool,
+    status_code: Option<u16>,
+    message: String,
+}
+
 async fn get_cpa_config(State(state): State<Arc<AppState>>) -> Response {
     let config = state.cpa_config.get();
     Json(CpaConfigResponse {
@@ -1145,6 +1161,49 @@ async fn update_cpa_config(
             .into_response()
         }
         Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    }
+}
+
+async fn test_cpa_connection(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<TestCpaConnectionRequest>,
+) -> Response {
+    let existing = state.cpa_config.get();
+    let management_key = match payload.management_key {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => existing.management_key,
+    };
+    let client = match CpaClient::new(&payload.base_url, &management_key) {
+        Ok(client) => client,
+        Err(err) => {
+            return Json(TestCpaConnectionResponse {
+                ok: false,
+                status_code: None,
+                message: err.to_string(),
+            })
+            .into_response();
+        }
+    };
+    match client.test_connection().await {
+        Ok(status) => Json(TestCpaConnectionResponse {
+            ok: status.is_success(),
+            status_code: Some(status.as_u16()),
+            message: status
+                .canonical_reason()
+                .unwrap_or(if status.is_success() {
+                    "OK"
+                } else {
+                    "HTTP error"
+                })
+                .to_string(),
+        })
+        .into_response(),
+        Err(err) => Json(TestCpaConnectionResponse {
+            ok: false,
+            status_code: None,
+            message: err.to_string(),
+        })
+        .into_response(),
     }
 }
 

@@ -63,6 +63,15 @@ impl CpaClient {
             .collect())
     }
 
+    pub async fn test_connection(&self) -> Result<reqwest::StatusCode> {
+        let response = self
+            .request(reqwest::Method::GET, "/v0/management/auth-files")
+            .send()
+            .await
+            .context("failed to request CPA auth file list")?;
+        Ok(response.status())
+    }
+
     pub async fn download_file(&self, name: &str) -> Result<Vec<u8>> {
         let response = self
             .request(reqwest::Method::GET, "/v0/management/auth-files/download")
@@ -212,6 +221,7 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::time::{Duration, Instant, sleep};
 
@@ -237,5 +247,30 @@ mod tests {
         assert!(format!("{err:#}").contains("failed to request CPA auth file list"));
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_connection_returns_remote_status_without_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let client = CpaClient {
+            base_url: format!("http://{addr}"),
+            management_key: "secret".to_string(),
+            http: build_http_client(Duration::from_secs(1)).unwrap(),
+        };
+
+        let status = client.test_connection().await.unwrap();
+        assert_eq!(status.as_u16(), 401);
+
+        server.await.unwrap();
     }
 }

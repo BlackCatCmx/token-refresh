@@ -887,8 +887,10 @@ pre {
 }
 
 .cpa-form-row--switch {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
   min-height: 48px;
-  align-content: center;
 }
 
 .cpa-form-row--inline {
@@ -905,6 +907,28 @@ pre {
   letter-spacing: 0.05em;
   color: #94a3b8;
   white-space: nowrap;
+}
+
+.cpa-test-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-self: end;
+}
+
+.cpa-test-result {
+  min-width: 36px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.cpa-test-result--ok {
+  color: #16a34a;
+}
+
+.cpa-test-result--error {
+  color: #dc2626;
 }
 
 .cpa-inline-field {
@@ -1129,6 +1153,13 @@ details.settings-group-collapsible > .grid { margin-top: 4px; }
   .cpa-tile--wide { grid-column: span 1; }
   .cpa-tile--full { grid-column: 1 / -1; }
   .cpa-config-layout { grid-template-columns: 1fr; }
+  .cpa-form-row--switch {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+  .cpa-test-control {
+    justify-self: start;
+  }
   .cpa-form-row--inline {
     grid-template-columns: 1fr;
     align-items: start;
