@@ -240,9 +240,10 @@ impl CpaManager {
             .filter(|entry| is_unauthorized_entry(entry))
             .cloned()
             .collect();
+        let inspect_started_at = Utc::now();
         let exhausted_entries: Vec<CpaAuthEntry> = active_entries
             .iter()
-            .filter(|entry| is_exhausted_entry(entry))
+            .filter(|entry| is_inspectable_exhausted_entry(entry, inspect_started_at))
             .cloned()
             .collect();
         result.candidates_401 = unauthorized_entries.len();
@@ -1114,6 +1115,21 @@ fn is_exhausted_entry(entry: &CpaAuthEntry) -> bool {
     status == "error" && status_message_indicates_exhausted(&entry.status_message)
 }
 
+fn is_inspectable_exhausted_entry(entry: &CpaAuthEntry, now: chrono::DateTime<Utc>) -> bool {
+    if !is_exhausted_entry(entry) {
+        return false;
+    }
+    match entry.plan_type.as_deref() {
+        Some(plan_type) => plan_type.trim().eq_ignore_ascii_case("free"),
+        None => entry
+            .next_retry_after
+            .as_deref()
+            .and_then(parse_rfc3339)
+            .map(|resets_at| resets_at > now + ChronoDuration::days(7))
+            .unwrap_or(false),
+    }
+}
+
 fn exhausted_resets_at(entry: &CpaAuthEntry, now: chrono::DateTime<Utc>) -> Option<String> {
     entry
         .next_retry_after
@@ -1375,11 +1391,27 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn exhausted_entry(plan_type: Option<&str>, next_retry_after: Option<&str>) -> CpaAuthEntry {
+        CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            plan_type: plan_type.map(str::to_string),
+            status: "error".to_string(),
+            status_message: "quota exhausted".to_string(),
+            disabled: false,
+            unavailable: true,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: next_retry_after.map(str::to_string),
+        }
+    }
+
     #[test]
     fn classifies_unauthorized_entries() {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: "Unauthorized".to_string(),
             disabled: false,
@@ -1402,6 +1434,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: "{\"error\":{\"code\":\"account_deactivated\"},\"status\":401}"
                 .to_string(),
@@ -1420,6 +1453,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: "quota exhausted".to_string(),
             disabled: false,
@@ -1432,10 +1466,48 @@ mod tests {
     }
 
     #[test]
+    fn auto_inspection_accepts_free_plan_without_reset_time() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let entry = exhausted_entry(Some(" FREE "), None);
+
+        assert!(is_inspectable_exhausted_entry(&entry, now));
+    }
+
+    #[test]
+    fn auto_inspection_uses_reset_over_seven_days_when_plan_is_missing() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let entry = exhausted_entry(None, Some("2030-01-08T00:00:01Z"));
+
+        assert!(is_inspectable_exhausted_entry(&entry, now));
+    }
+
+    #[test]
+    fn auto_inspection_rejects_reset_at_or_under_seven_days_when_plan_is_missing() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        for reset in [None, Some("invalid"), Some("2030-01-08T00:00:00Z")] {
+            let entry = exhausted_entry(None, reset);
+            assert!(!is_inspectable_exhausted_entry(&entry, now));
+        }
+    }
+
+    #[test]
+    fn explicit_non_free_plan_overrides_long_reset_time() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let entry = exhausted_entry(Some("plus"), Some("2030-02-01T00:00:00Z"));
+
+        assert!(!is_inspectable_exhausted_entry(&entry, now));
+        assert!(matches!(
+            classify_reclaim_import(&entry),
+            ImportStatusKind::NormalExhausted
+        ));
+    }
+
+    #[test]
     fn classifies_usage_limit_reached_entries_as_exhausted() {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_at":1893456000,"resets_in_seconds":60}}"#.to_string(),
             disabled: false,
@@ -1457,6 +1529,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: r#"{"error":{"type":"usage_limit_reached"}}"#.to_string(),
             disabled: false,
@@ -1473,6 +1546,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: "usage_limit_reached".to_string(),
             disabled: false,
@@ -1489,6 +1563,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: r#"{"status":429,"body":{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":"7"}}}"#.to_string(),
             disabled: false,
@@ -1523,6 +1598,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: r#"{"error":{"type":"usage_limit_reached","resets_at":1893456000}}"#
                 .to_string(),
@@ -1544,6 +1620,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "disabled".to_string(),
             status_message: "disabled via management API".to_string(),
             disabled: false,
@@ -1567,6 +1644,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: "payment_required".to_string(),
             disabled: false,
@@ -1589,6 +1667,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: "not_found".to_string(),
             disabled: false,
@@ -1611,6 +1690,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "active".to_string(),
             status_message: String::new(),
             disabled: false,
@@ -1630,6 +1710,7 @@ mod tests {
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
+            plan_type: None,
             status: "error".to_string(),
             status_message: "transient upstream error".to_string(),
             disabled: false,
@@ -1864,6 +1945,7 @@ mod tests {
         let remaining_active = vec![CpaAuthEntry {
             name: "remote.json".to_string(),
             email: Some("on-cpa@example.com".to_string()),
+            plan_type: None,
             status: "active".to_string(),
             status_message: String::new(),
             disabled: false,

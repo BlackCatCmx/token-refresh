@@ -11,6 +11,7 @@ const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct CpaAuthEntry {
     pub name: String,
     pub email: Option<String>,
+    pub plan_type: Option<String>,
     pub status: String,
     pub status_message: String,
     pub disabled: bool,
@@ -157,6 +158,8 @@ struct RawAuthFileEntry {
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
+    id_token: Option<RawIdTokenClaims>,
+    #[serde(default)]
     status: String,
     #[serde(default)]
     status_message: String,
@@ -170,6 +173,12 @@ struct RawAuthFileEntry {
     runtime_only: bool,
     #[serde(default)]
     next_retry_after: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawIdTokenClaims {
+    #[serde(default)]
+    plan_type: Option<String>,
 }
 
 impl RawAuthFileEntry {
@@ -192,6 +201,9 @@ impl RawAuthFileEntry {
         Some(CpaAuthEntry {
             name: name.to_string(),
             email: normalize_optional_string(self.email),
+            plan_type: self
+                .id_token
+                .and_then(|claims| normalize_optional_string(claims.plan_type)),
             status: self.status.trim().to_string(),
             status_message: self.status_message.trim().to_string(),
             disabled: self.disabled,
@@ -224,6 +236,29 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::time::{Duration, Instant, sleep};
+
+    #[test]
+    fn parses_plan_type_from_cpa_id_token_claims() {
+        let payload: ListAuthFilesResponse = serde_json::from_value(serde_json::json!({
+            "files": [{
+                "name": "free.json",
+                "provider": "codex",
+                "source": "file",
+                "id_token": { "plan_type": " Free " }
+            }]
+        }))
+        .unwrap();
+
+        let entry = payload
+            .files
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_codex_entry()
+            .unwrap();
+
+        assert_eq!(entry.plan_type.as_deref(), Some("Free"));
+    }
 
     #[tokio::test]
     async fn list_codex_files_times_out() {
