@@ -82,8 +82,9 @@ GET 响应格式：
       "type": "codex",
       "provider": "codex",
       "email": "user@example.com",
+      "id_token": { "plan_type": "free" },
       "status": "active|error|pending|refreshing|disabled|unknown",
-      "status_message": "quota exhausted",
+      "status_message": "{\"error\":{\"type\":\"usage_limit_reached\",\"plan_type\":\"free\",\"resets_at\":1776262806}}",
       "disabled": false,
       "unavailable": true,
       "next_retry_after": "2026-04-15T22:20:00Z"
@@ -92,7 +93,7 @@ GET 响应格式：
 }
 ```
 
-`next_retry_after` 字段来源：CLIProxyAPI 收到 OpenAI 429 + `usage_limit_reached` 错误时，优先解析响应体中的 `error.resets_at`（Unix 时间戳）；若缺失则回退 `error.resets_in_seconds`；若二者都缺失则回退 CLIProxyAPI 自身的本地 cooldown/backoff。最终写入 `auth.NextRetryAfter` / `auth.Quota.NextRecoverAt`，并通过 `buildAuthFileEntry` 暴露为该字段。
+`next_retry_after` 字段来源：CLIProxyAPI 收到 OpenAI 429 + `usage_limit_reached` 错误时，优先解析响应体中的 `error.resets_at`（Unix 时间戳）；若缺失则回退 `error.resets_in_seconds`；若二者都缺失则回退 CLIProxyAPI 自身的本地 cooldown/backoff。最终写入 `auth.NextRetryAfter` / `auth.Quota.NextRecoverAt`，并在认证级 `NextRetryAfter` 非零时通过 `buildAuthFileEntry` 条件返回。模型级错误路径会在 `status_message` 中保留原始 JSON；认证级 429 路径可能只返回 `quota exhausted`。
 
 OpenAI 原始错误格式：
 ```json
@@ -113,12 +114,13 @@ OpenAI 原始错误格式：
 | 条件 | 识别为 |
 |------|------|
 | `type/provider="codex"` 且 `status="error"` 且 `status_message` 含 `unauthorized`，或含 `account_deactivated`，或序列化 JSON 中含 `"status": 401` | 异常凭证（401） |
-| `type/provider="codex"` 且 `status="error"` 且 `status_message` 等于或包含 `quota exhausted` | 耗尽凭证 |
+| `type/provider="codex"` 且 `status="error"`，并且结构化错误的 `error.type="usage_limit_reached"`，或 `status_message` 包含 `quota exhausted` / `usage limit has been reached` | 耗尽凭证 |
 
 补充约束：
 - **不使用** `unavailable=true` 作为耗尽判据。CLIProxyAPI 会把 401、429、404、408、5xx 等多类失败都先标记为 `unavailable=true`，直接使用该字段会误判。
-- `next_retry_after` 只用于展示和自动恢复时间计算，不单独作为“耗尽”判据。
-- `usage_limit_reached`、`resets_at`、`resets_in_seconds` 属于 CLIProxyAPI 在上游 429 响应里解析后的内部来源；首版 token-refresh 被动巡查不直接读取这些原始错误体，只消费管理列表已经暴露出来的 `status_message` 和 `next_retry_after`。
+- `next_retry_after` 只用于缺少套餐信息时的长期窗口推测，以及自动恢复时间计算，不单独作为“耗尽”判据。
+- 自动巡查从结构化 `status_message` 读取 `error.plan_type`，其优先级高于 CPA 从凭证 `id_token` 解析出的套餐。两处套餐均缺失时，才使用恢复时间超过 7 天的长期窗口推测；明确的非 Free 套餐不使用该推测。
+- 长期窗口的时间来源顺序为有效的未来 `error.resets_at`、有效的未来 `next_retry_after`、正数 `error.resets_in_seconds`。
 - `status_message` 匹配前统一做 `trim().to_ascii_lowercase()`；401 判定同时兼容纯文本文案与序列化 JSON 错误串，当前规则依赖 CLIProxyAPI 现有输出，若后续版本调整文案或字段，需要同步调整该匹配条件。
 
 ---
@@ -154,24 +156,26 @@ pub cpa_exhausted: Option<bool>,         // true = 从 CPA 移入的耗尽凭证
 pub cpa_imported_at: Option<String>,     // RFC3339，何时从 CPA 移入
 
 #[serde(default)]
-pub exhausted_resets_at: Option<String>, // RFC3339，来自 next_retry_after 的配额重置时间
+pub exhausted_resets_at: Option<String>, // RFC3339，选定的配额重置时间
 ```
 
 ### 自动恢复机制
 
-1. **移入时**：从管理 API 条目读取 `next_retry_after`：
-   - 非零 → 写入 `exhausted_resets_at`
-   - 为零 → `exhausted_resets_at` 留空，依赖兜底策略
+1. **移入时**：按顺序选择仍在未来的恢复时间并写入 `exhausted_resets_at`：
+   - 结构化错误的绝对时间 `error.resets_at`
+   - CPA 的绝对时间 `next_retry_after`
+   - 两个绝对时间均不可用时，使用 `error.resets_in_seconds` 计算相对时间
+   - 均不可用时留空，依赖兜底策略
 2. **定期检查**：CPA scheduler 每次唤醒时，扫描所有 `cpa_exhausted=true` 的凭证，判断是否到期：
    - 优先：`exhausted_resets_at` 非空 且 `now >= exhausted_resets_at`
-   - 兜底：`exhausted_resets_at` 为空 且 `now >= cpa_imported_at + 7d + 12h`
-   - 满足任一条件 → 清除 `cpa_exhausted` 和 `exhausted_resets_at`，写 cpa.log
-3. **兜底说明**：OpenAI 的免费额度按 7 天周期恢复，`cpa_imported_at` 代表确认耗尽的时间点；采用 `7d + 12h` 作为保守兜底，避免提前恢复展示为“正常”。
+   - 兜底：`exhausted_resets_at` 为空 且 `now >= cpa_imported_at + 721h`
+   - 满足任一条件 → 清除 `cpa_exhausted`、`cpa_imported_at` 和 `exhausted_resets_at`，写 cpa.log
+3. **兜底说明**：`cpa_imported_at` 代表确认耗尽的时间点；缺少可信恢复时间时采用 `30d + 1h` 的保守兜底，避免月度额度窗口被提前恢复为“正常”。
 
 ### UI 显示规则
 
 - `cpa_exhausted=true` 且 `exhausted_resets_at` 非空：显示 `耗尽（重置于 04/15 22:20）`（橙黄）
-- `cpa_exhausted=true` 且 `exhausted_resets_at` 为空：显示 `耗尽（~7d 后自动恢复）`（橙黄）
+- `cpa_exhausted=true` 且 `exhausted_resets_at` 为空：显示 `耗尽（约30天1小时后自动恢复）`（橙黄）
 - `cpa_exhausted=false/null`：维持现有渲染逻辑
 
 ### 新增 status.rs 方法
@@ -240,6 +244,7 @@ impl CpaConfigStore {
 pub struct CpaAuthEntry {
     pub name: String,
     pub email: Option<String>,
+    pub plan_type: Option<String>,       // CPA 从 id_token 解析的套餐
     pub status: String,
     pub status_message: String,
     pub disabled: bool,
@@ -326,7 +331,7 @@ impl CpaManager {
 8. 处理 401 候选（异常凭证）：
    对每个候选执行 move_from_cpa(entry, Abnormal, resets_at=None)
 9. 处理 exhausted 候选：
-   对每个候选执行 move_from_cpa(entry, Normal, resets_at=entry.next_retry_after)
+   对每个候选按 `error.resets_at`、`next_retry_after`、`error.resets_in_seconds` 的顺序计算恢复时间，执行 move_from_cpa(entry, Normal, resets_at)
 10. 若 auto_supplement_enabled：
     a. 重新 list_codex_files()（获取巡查后真实剩余数量）
     b. need = supplement_target - remaining（若 <= 0 则跳过）

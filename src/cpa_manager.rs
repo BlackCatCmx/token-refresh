@@ -1119,10 +1119,10 @@ fn is_inspectable_exhausted_entry(entry: &CpaAuthEntry, now: chrono::DateTime<Ut
     if !is_exhausted_entry(entry) {
         return false;
     }
-    match entry.plan_type.as_deref() {
+    let error_plan_type = status_message_error_string(&entry.status_message, "plan_type");
+    match error_plan_type.as_deref().or(entry.plan_type.as_deref()) {
         Some(plan_type) => plan_type.trim().eq_ignore_ascii_case("free"),
-        None => entry
-            .next_retry_after
+        None => exhausted_resets_at(entry, now)
             .as_deref()
             .and_then(parse_rfc3339)
             .map(|resets_at| resets_at > now + ChronoDuration::days(7))
@@ -1131,10 +1131,28 @@ fn is_inspectable_exhausted_entry(entry: &CpaAuthEntry, now: chrono::DateTime<Ut
 }
 
 fn exhausted_resets_at(entry: &CpaAuthEntry, now: chrono::DateTime<Utc>) -> Option<String> {
-    entry
+    let error = parse_status_message_error(&entry.status_message);
+    if let Some(resets_at) = error
+        .as_ref()
+        .and_then(|error| json_i64(error.get("resets_at")))
+        .filter(|value| *value > now.timestamp())
+        .and_then(|value| chrono::DateTime::<Utc>::from_timestamp(value, 0))
+    {
+        return Some(resets_at.to_rfc3339());
+    }
+    if let Some(next_retry_after) = entry
         .next_retry_after
-        .clone()
-        .or_else(|| parse_status_message_resets_at(&entry.status_message, now))
+        .as_deref()
+        .filter(|value| parse_rfc3339(value).is_some_and(|resets_at| resets_at > now))
+    {
+        return Some(next_retry_after.to_string());
+    }
+    let resets_in_seconds = error
+        .as_ref()
+        .and_then(|error| json_i64(error.get("resets_in_seconds")))
+        .filter(|value| *value > 0)?;
+    now.checked_add_signed(ChronoDuration::try_seconds(resets_in_seconds)?)
+        .map(|resets_at| resets_at.to_rfc3339())
 }
 
 fn status_message_indicates_exhausted(status_message: &str) -> bool {
@@ -1150,26 +1168,14 @@ fn status_message_indicates_exhausted(status_message: &str) -> bool {
     false
 }
 
-fn parse_status_message_resets_at(
-    status_message: &str,
-    now: chrono::DateTime<Utc>,
-) -> Option<String> {
-    let error = parse_status_message_error(status_message)?;
-    if let Some(resets_at) =
-        json_i64(error.get("resets_at")).filter(|value| *value > now.timestamp())
-    {
-        return chrono::DateTime::<Utc>::from_timestamp(resets_at, 0)
-            .map(|value| value.to_rfc3339());
-    }
-    let resets_in_seconds = json_i64(error.get("resets_in_seconds")).filter(|value| *value > 0)?;
-    Some((now + ChronoDuration::seconds(resets_in_seconds)).to_rfc3339())
+fn status_message_error_type(status_message: &str) -> Option<String> {
+    status_message_error_string(status_message, "type").map(|value| value.to_ascii_lowercase())
 }
 
-fn status_message_error_type(status_message: &str) -> Option<String> {
-    parse_status_message_error(status_message)?
-        .get("type")?
-        .as_str()
-        .map(|value| value.trim().to_ascii_lowercase())
+fn status_message_error_string(status_message: &str, field: &str) -> Option<String> {
+    let error = parse_status_message_error(status_message)?;
+    let value = error.get(field)?.as_str()?.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn parse_status_message_error(status_message: &str) -> Option<Value> {
@@ -1474,9 +1480,53 @@ mod tests {
     }
 
     #[test]
+    fn auto_inspection_prefers_error_free_plan_over_id_token_plan() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let mut entry = exhausted_entry(Some("plus"), None);
+        entry.status_message =
+            r#"{"error":{"type":"usage_limit_reached","plan_type":" FREE "}}"#.to_string();
+
+        assert!(is_inspectable_exhausted_entry(&entry, now));
+    }
+
+    #[test]
+    fn auto_inspection_accepts_current_usage_limit_error_without_cpa_metadata() {
+        let now = parse_rfc3339("2026-08-06T00:00:00Z").unwrap();
+        let mut entry = exhausted_entry(None, None);
+        entry.status_message = r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"free","resets_at":1787661460,"eligible_promo":null,"resets_in_seconds":1672384}}"#.to_string();
+
+        assert!(is_inspectable_exhausted_entry(&entry, now));
+        assert_eq!(
+            exhausted_resets_at(&entry, now).as_deref(),
+            Some("2026-08-25T12:37:40+00:00")
+        );
+    }
+
+    #[test]
+    fn auto_inspection_error_non_free_plan_overrides_id_token_and_long_reset() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let mut entry = exhausted_entry(Some("free"), Some("2030-02-01T00:00:00Z"));
+        entry.status_message =
+            r#"{"status":429,"body":{"error":{"type":"usage_limit_reached","plan_type":"plus"}}}"#
+                .to_string();
+
+        assert!(!is_inspectable_exhausted_entry(&entry, now));
+    }
+
+    #[test]
     fn auto_inspection_uses_reset_over_seven_days_when_plan_is_missing() {
         let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
         let entry = exhausted_entry(None, Some("2030-01-08T00:00:01Z"));
+
+        assert!(is_inspectable_exhausted_entry(&entry, now));
+    }
+
+    #[test]
+    fn auto_inspection_uses_error_reset_when_plan_and_next_retry_are_missing() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let mut entry = exhausted_entry(None, None);
+        entry.status_message =
+            r#"{"error":{"type":"usage_limit_reached","resets_at":1894147201}}"#.to_string();
 
         assert!(is_inspectable_exhausted_entry(&entry, now));
     }
@@ -1576,7 +1626,7 @@ mod tests {
 
         assert!(is_exhausted_entry(&entry));
         assert_eq!(
-            parse_status_message_resets_at(&entry.status_message, now).as_deref(),
+            exhausted_resets_at(&entry, now).as_deref(),
             Some("2030-01-01T00:00:07+00:00")
         );
     }
@@ -1584,17 +1634,20 @@ mod tests {
     #[test]
     fn expired_status_message_resets_at_falls_back_to_resets_in_seconds() {
         let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
-        let status_message =
-            r#"{"error":{"type":"usage_limit_reached","resets_at":1,"resets_in_seconds":9}}"#;
+        let mut entry = exhausted_entry(None, None);
+        entry.status_message =
+            r#"{"error":{"type":"usage_limit_reached","resets_at":1,"resets_in_seconds":9}}"#
+                .to_string();
 
         assert_eq!(
-            parse_status_message_resets_at(status_message, now).as_deref(),
+            exhausted_resets_at(&entry, now).as_deref(),
             Some("2030-01-01T00:00:09+00:00")
         );
     }
 
     #[test]
-    fn prefers_cpa_next_retry_after_over_raw_status_message_reset() {
+    fn prefers_status_message_reset_over_cpa_next_retry_after() {
+        let now = parse_rfc3339("2029-12-31T00:00:00Z").unwrap();
         let entry = CpaAuthEntry {
             name: "a.json".to_string(),
             email: None,
@@ -1610,8 +1663,46 @@ mod tests {
         };
 
         assert_eq!(
-            exhausted_resets_at(&entry, Utc::now()).as_deref(),
-            Some("2030-02-01T00:00:00Z")
+            exhausted_resets_at(&entry, now).as_deref(),
+            Some("2030-01-01T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn prefers_cpa_next_retry_after_over_relative_reset_seconds() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let mut entry = exhausted_entry(None, Some("2030-01-02T00:00:00Z"));
+        entry.status_message =
+            r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":9}}"#.to_string();
+
+        assert_eq!(
+            exhausted_resets_at(&entry, now).as_deref(),
+            Some("2030-01-02T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn ignores_invalid_or_expired_cpa_next_retry_after() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        for next_retry_after in ["invalid", "2029-12-31T23:59:59Z"] {
+            let entry = exhausted_entry(None, Some(next_retry_after));
+            assert_eq!(exhausted_resets_at(&entry, now), None);
+            assert!(!is_inspectable_exhausted_entry(&entry, now));
+        }
+    }
+
+    #[test]
+    fn invalid_status_reset_falls_back_to_cpa_next_retry_after() {
+        let now = parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
+        let mut entry = exhausted_entry(None, Some("2030-01-02T00:00:00Z"));
+        entry.status_message = format!(
+            r#"{{"error":{{"type":"usage_limit_reached","resets_at":{}}}}}"#,
+            i64::MAX
+        );
+
+        assert_eq!(
+            exhausted_resets_at(&entry, now).as_deref(),
+            Some("2030-01-02T00:00:00Z")
         );
     }
 
