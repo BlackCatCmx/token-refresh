@@ -109,7 +109,7 @@ impl S3CompatibleClient {
                 let (created_at, trigger) = parse_snapshot_name(&object.key);
                 snapshots.push(RemoteSnapshot {
                     key: object.key.clone(),
-                    size: object.size as u64,
+                    size: object.size,
                     last_modified: normalize_timestamp(&object.last_modified),
                     created_at,
                     trigger,

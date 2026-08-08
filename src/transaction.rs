@@ -192,16 +192,8 @@ impl RefreshTransaction {
         };
         let outcome = match refresh_result {
             Ok(payload) => {
-                self.handle_success(
-                    config,
-                    zone,
-                    key,
-                    trigger,
-                    generation,
-                    &mut credential,
-                    payload,
-                )
-                .await
+                self.handle_success(zone, key, trigger, generation, &mut credential, payload)
+                    .await
             }
             Err(error) => {
                 self.handle_failure(config, zone, key, trigger, generation, error)
@@ -228,7 +220,6 @@ impl RefreshTransaction {
 
     async fn handle_success(
         &self,
-        _config: &AppConfig,
         zone: CredentialZone,
         key: &str,
         trigger: RefreshTrigger,
@@ -761,10 +752,11 @@ fn merge_refresh_response(
     if let Some(expires_in) = payload.expires_in.filter(|value| *value > 0) {
         let expires_at = Utc::now() + ChronoDuration::seconds(expires_in);
         credential.set_expired_at(expires_at);
-    } else if credential.expired.is_none() && !credential.access_token.is_empty() {
-        if let Ok(expiration) = jwt::decode_expiration(&credential.access_token) {
-            credential.set_expired_at(expiration);
-        }
+    } else if credential.expired.is_none()
+        && !credential.access_token.is_empty()
+        && let Ok(expiration) = jwt::decode_expiration(&credential.access_token)
+    {
+        credential.set_expired_at(expiration);
     }
     Ok(())
 }

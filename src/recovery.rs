@@ -94,12 +94,11 @@ fn recover_one(recovery_path: &Path, logger: &LogManager) -> Result<()> {
     let desired = serde_json::to_vec_pretty(&record.credential).context("serialize recovery")?;
     let already_restored = existing
         .as_deref()
-        .map(|bytes| {
+        .and_then(|bytes| {
             let existing_value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
             let desired_value: serde_json::Value = serde_json::from_slice(&desired).ok()?;
             Some(existing_value == desired_value)
         })
-        .flatten()
         .unwrap_or(false);
     if already_restored {
         std::fs::remove_file(recovery_path)

@@ -324,7 +324,7 @@ impl SchedulerRuntime {
             status.wait_reason = None;
         }
         if plan.due_keys.is_empty() {
-            let sleep_duration = compute_idle_sleep(&config, now, plan.next_due_at.clone())?;
+            let sleep_duration = compute_idle_sleep(&config, now, plan.next_due_at)?;
             let next_check_at = advance_time(now, sleep_duration)?;
             {
                 let mut status = self.status.write().await;
@@ -374,10 +374,10 @@ impl SchedulerRuntime {
                     crate::transaction::RefreshTrigger::Scheduler,
                 )
                 .await?;
-            if outcome.success {
-                if let Some(backup) = &self.backup {
-                    backup.mark_dirty("scheduler_refresh_success");
-                }
+            if outcome.success
+                && let Some(backup) = &self.backup
+            {
+                backup.mark_dirty("scheduler_refresh_success");
             }
             self.update_backoff(&config, &outcome).await?;
             let latest_plan = self.collect_schedule_plan(&config, Utc::now()).await?;

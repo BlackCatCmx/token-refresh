@@ -509,24 +509,23 @@ impl BackupCoordinator {
             last_daily_backup_for,
             last_daily_failure_for,
             now,
-        ) {
-            if self.try_begin_backup_operation(false).await? {
-                let result = self.run_backup_once(BackupTrigger::Daily, None).await;
-                self.finish_backup_operation(false, &result).await;
-                result?;
-                return Ok(());
-            }
+        ) && self.try_begin_backup_operation(false).await?
+        {
+            let result = self.run_backup_once(BackupTrigger::Daily, None).await;
+            self.finish_backup_operation(false, &result).await;
+            result?;
+            return Ok(());
         }
 
-        if self.should_run_after_refresh(&config.backup, now).await? {
-            if self.try_begin_backup_operation(false).await? {
-                let result = self
-                    .run_backup_once(BackupTrigger::AfterRefresh, None)
-                    .await;
-                self.finish_backup_operation(false, &result).await;
-                result?;
-                return Ok(());
-            }
+        if self.should_run_after_refresh(&config.backup, now).await?
+            && self.try_begin_backup_operation(false).await?
+        {
+            let result = self
+                .run_backup_once(BackupTrigger::AfterRefresh, None)
+                .await;
+            self.finish_backup_operation(false, &result).await;
+            result?;
+            return Ok(());
         }
 
         let wait_duration = self.next_wait_duration(&config.backup, now).await?;

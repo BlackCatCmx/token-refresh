@@ -25,6 +25,8 @@ const VERSION: u32 = 1;
 const AES_AUTH_CODE_ERROR_TEXT: &str =
     "Invalid authentication code, this could be due to an invalid password or errors in the data";
 
+type CredentialFileMap = BTreeMap<String, Vec<u8>>;
+
 #[derive(Clone, Debug)]
 pub struct MigrationArchiveInput {
     pub normal_files: BTreeMap<String, Vec<u8>>,
@@ -415,7 +417,7 @@ fn parse_cpa_config(files: &BTreeMap<String, Vec<u8>>) -> Result<CpaConfig> {
 
 fn split_credential_files(
     files: BTreeMap<String, Vec<u8>>,
-) -> Result<(BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>)> {
+) -> Result<(CredentialFileMap, CredentialFileMap)> {
     let mut normal_files = BTreeMap::new();
     let mut abnormal_files = BTreeMap::new();
     for (path, bytes) in files {
