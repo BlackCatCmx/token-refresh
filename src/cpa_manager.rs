@@ -1104,9 +1104,14 @@ enum SupplementCommitOutcome {
 fn is_unauthorized_entry(entry: &CpaAuthEntry) -> bool {
     let status = entry.status.trim().to_ascii_lowercase();
     let status_message = entry.status_message.trim().to_ascii_lowercase();
+    let error_type = status_message_error_type(&entry.status_message);
+    let error_code = status_message_error_string(&entry.status_message, "code")
+        .map(|value| value.to_ascii_lowercase());
     status == "error"
         && (status_message.contains("unauthorized")
             || status_message.contains("account_deactivated")
+            || (error_type.as_deref() == Some("authentication_error")
+                && error_code.as_deref() == Some("auth_unavailable"))
             || contains_status_code(&status_message, 401))
 }
 
@@ -1444,6 +1449,24 @@ mod tests {
             status: "error".to_string(),
             status_message: "{\"error\":{\"code\":\"account_deactivated\"},\"status\":401}"
                 .to_string(),
+            disabled: false,
+            unavailable: true,
+            source: "file".to_string(),
+            runtime_only: false,
+            next_retry_after: None,
+        };
+        assert!(is_unauthorized_entry(&entry));
+        assert!(!is_exhausted_entry(&entry));
+    }
+
+    #[test]
+    fn classifies_structured_auth_unavailable_entries() {
+        let entry = CpaAuthEntry {
+            name: "a.json".to_string(),
+            email: None,
+            plan_type: None,
+            status: "error".to_string(),
+            status_message: r#"{"error":{"message":"Encountered invalidated oauth token for user, failing request","type":"authentication_error","code":"auth_unavailable"}}"#.to_string(),
             disabled: false,
             unavailable: true,
             source: "file".to_string(),

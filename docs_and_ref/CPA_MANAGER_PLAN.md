@@ -113,7 +113,7 @@ OpenAI 原始错误格式：
 
 | 条件 | 识别为 |
 |------|------|
-| `type/provider="codex"` 且 `status="error"` 且 `status_message` 含 `unauthorized`，或含 `account_deactivated`，或序列化 JSON 中含 `"status": 401` | 异常凭证（401） |
+| `type/provider="codex"` 且 `status="error"` 且 `status_message` 含 `unauthorized`，或含 `account_deactivated`，或结构化错误为 `error.type="authentication_error"` 且 `error.code="auth_unavailable"`，或序列化 JSON 中含 `"status": 401` | 异常凭证（401） |
 | `type/provider="codex"` 且 `status="error"`，并且结构化错误的 `error.type="usage_limit_reached"`，或 `status_message` 包含 `quota exhausted` / `usage limit has been reached` | 耗尽凭证 |
 
 补充约束：
