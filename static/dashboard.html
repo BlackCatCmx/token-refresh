@@ -64,7 +64,7 @@
             <button type="button" onclick="reloadLog('audit')">刷新</button>
             <button type="button" class="secondary" onclick="downloadLog('audit')">下载</button>
             <button type="button" class="warn" onclick="clearLog('audit')">清空</button>
-            <button type="button" class="secondary" onclick="downloadLog('all')">打包下载全部日志</button>
+            <button id="audit-failure-filter" type="button" class="secondary filter-toggle" aria-pressed="false" onclick="toggleAuditFailureFilter()">仅显示失败</button>
           </div>
           <pre id="audit-log"></pre>
         </section>

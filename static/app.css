@@ -207,6 +207,17 @@ button.secondary:hover {
   box-shadow: none;
 }
 
+button.secondary.filter-toggle.active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: white;
+  box-shadow: 0 2px 8px rgba(37,99,235,0.22);
+}
+button.secondary.filter-toggle.active:hover {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+
 /* Amber — significant but reversible */
 button.warn {
   background: #b45309;

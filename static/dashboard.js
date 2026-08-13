@@ -1,6 +1,8 @@
 let schedulerPollTimer = null;
 let schedulerManualActive = false;
 let backupStatusCache = null;
+let auditFailureOnly = false;
+let auditLogContent = "";
 let credPageSize = 50;
 let backupRemoteDrafts = [];
 let backupRemotesLocked = false;
@@ -1741,7 +1743,11 @@ async function runCpaInspectOnce() {
 
 async function reloadLog(kind) {
   const data = await api(`api/logs?kind=${kind}&limit=${LOG_LINE_LIMIT}`);
-  renderLog(kind, data.content || "");
+  const content = data.content || "";
+  if (kind === "audit") {
+    auditLogContent = content;
+  }
+  renderLog(kind, content);
 }
 
 async function reloadCpaLog() {
@@ -1755,6 +1761,15 @@ function downloadLog(kind) {
 
 function downloadCpaLog() {
   window.location.href = "api/cpa/logs/download";
+}
+
+function toggleAuditFailureFilter() {
+  auditFailureOnly = !auditFailureOnly;
+  const button = document.getElementById("audit-failure-filter");
+  button.classList.toggle("active", auditFailureOnly);
+  button.setAttribute("aria-pressed", String(auditFailureOnly));
+  button.textContent = auditFailureOnly ? "显示全部" : "仅显示失败";
+  renderLog("audit", auditLogContent);
 }
 
 async function clearLog(kind) {
@@ -1824,6 +1839,15 @@ function classifyLogLine(line) {
 
 function renderLog(kind, content) {
   const container = document.getElementById(`${kind}-log`);
+  if (kind === "audit" && auditFailureOnly) {
+    content = content
+      .split(/\r?\n/)
+      .filter((line) => {
+        const tone = classifyLogLine(line);
+        return tone === "warn" || tone === "error";
+      })
+      .join("\n");
+  }
   if (!content) {
     container.textContent = "";
     return;
@@ -1884,6 +1908,7 @@ window.submitCpaSupplement = submitCpaSupplement;
 window.reloadCpaLog = reloadCpaLog;
 window.downloadCpaLog = downloadCpaLog;
 window.clearCpaLog = clearCpaLog;
+window.toggleAuditFailureFilter = toggleAuditFailureFilter;
 window.openBackupRunModal = openBackupRunModal;
 window.closeBackupRunModal = closeBackupRunModal;
 window.selectBackupRunRemote = selectBackupRunRemote;

@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -1255,27 +1254,7 @@ async fn download_logs(
             Ok(bytes) => download_response("text/plain; charset=utf-8", "audit.log", bytes),
             Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
         },
-        LogKind::All => match build_log_archive(&state) {
-            Ok(bytes) => download_response("application/zip", "logs.zip", bytes),
-            Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-        },
     }
-}
-
-fn build_log_archive(state: &AppState) -> Result<Vec<u8>> {
-    let cursor = std::io::Cursor::new(Vec::new());
-    let mut writer = zip::ZipWriter::new(cursor);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    for (name, kind) in [
-        ("runtime.log", LogKind::Runtime),
-        ("audit.log", LogKind::Audit),
-    ] {
-        writer.start_file(name, options)?;
-        writer.write_all(&state.logger.read_bytes(kind)?)?;
-    }
-    let cursor = writer.finish()?;
-    Ok(cursor.into_inner())
 }
 
 #[derive(Debug, Deserialize)]

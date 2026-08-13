@@ -10,7 +10,6 @@ use chrono::{FixedOffset, Utc};
 pub enum LogKind {
     Runtime,
     Audit,
-    All,
 }
 
 impl LogKind {
@@ -18,7 +17,6 @@ impl LogKind {
         match value {
             "runtime" => Ok(Self::Runtime),
             "audit" => Ok(Self::Audit),
-            "all" => Ok(Self::All),
             other => bail!("unsupported log kind: {other}"),
         }
     }
@@ -124,11 +122,6 @@ impl LogManager {
         match kind {
             LogKind::Runtime => read_tail_lines(&self.runtime_path, limit_lines),
             LogKind::Audit => read_tail_lines(&self.audit_path, limit_lines),
-            LogKind::All => {
-                let runtime = read_tail_lines(&self.runtime_path, limit_lines)?;
-                let audit = read_tail_lines(&self.audit_path, limit_lines)?;
-                Ok(format!("== runtime ==\n{runtime}\n== audit ==\n{audit}"))
-            }
         }
     }
 
@@ -136,10 +129,6 @@ impl LogManager {
         match kind {
             LogKind::Runtime => truncate_file(&self.runtime_path),
             LogKind::Audit => truncate_file(&self.audit_path),
-            LogKind::All => {
-                truncate_file(&self.runtime_path)?;
-                truncate_file(&self.audit_path)
-            }
         }
     }
 
@@ -149,7 +138,6 @@ impl LogManager {
                 .with_context(|| format!("failed to read {}", self.runtime_path.display())),
             LogKind::Audit => fs::read(&self.audit_path)
                 .with_context(|| format!("failed to read {}", self.audit_path.display())),
-            LogKind::All => bail!("LogKind::All requires archive download"),
         }
     }
 
