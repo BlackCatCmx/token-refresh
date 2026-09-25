@@ -28,7 +28,3 @@ Thumbs.db
 /cpa_test/
 /test/
 **/*.refresh-recovery.json
-
-# Reference projects not intended for this repo
-/docs_and_ref/CLIProxyAPI/
-/docs_and_ref/Cli-Proxy-API-Management-Center/
