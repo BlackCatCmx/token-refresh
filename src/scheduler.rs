@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -227,7 +227,7 @@ impl SchedulerHandle {
     }
 
     pub fn wake(&self) {
-        self.notify.notify_waiters();
+        self.notify.notify_one();
     }
 
     pub async fn clear_backoff(&self) {
@@ -304,6 +304,7 @@ impl SchedulerRuntime {
                     .logger
                     .runtime("error", format!("scheduler cycle failed: {err:#}"));
                 let mut status = self.status.write().await;
+                status.current_key = None;
                 status.last_error = Some(err.to_string());
                 status.last_cycle_at = Some(Utc::now().to_rfc3339());
             }
@@ -312,68 +313,87 @@ impl SchedulerRuntime {
 
     async fn run_cycle(&self) -> Result<()> {
         let config = self.config_manager.effective_config().await;
-        let now = Utc::now();
-        let plan = self.collect_schedule_plan(&config, now).await?;
-        {
-            let mut status = self.status.write().await;
-            status.enabled = true;
-            status.last_cycle_at = Some(now.to_rfc3339());
-            status.next_key = plan.next_key();
-            status.next_wake_at = None;
-            status.next_due_at = plan.next_due_at_rfc3339();
-            status.wait_reason = None;
-        }
-        if plan.due_keys.is_empty() {
-            let sleep_duration = compute_idle_sleep(&config, now, plan.next_due_at)?;
-            let next_check_at = advance_time(now, sleep_duration)?;
+        // A still-due credential must not monopolize the batch after a refresh.
+        let mut processed_keys = HashSet::new();
+        loop {
+            let now = Utc::now();
+            let plan = self.collect_schedule_plan(&config, now).await?;
+            let next_key = plan.next_key_excluding(&processed_keys);
             {
                 let mut status = self.status.write().await;
-                status.next_wake_at = Some(next_check_at.to_rfc3339());
-                status.wait_reason = Some("idle_sleep".to_string());
+                status.enabled = true;
+                status.last_cycle_at = Some(now.to_rfc3339());
+                status.next_key = next_key;
+                status.next_wake_at = None;
+                status.next_due_at = plan.next_due_at_rfc3339();
+                status.wait_reason = None;
             }
-            tokio::select! {
-                _ = tokio::time::sleep(sleep_duration) => {}
-                _ = self.notify.notified() => {}
+            let Some((index, due_entry)) = plan
+                .due_keys
+                .iter()
+                .enumerate()
+                .find(|(_, entry)| !processed_keys.contains(&entry.key))
+            else {
+                if !processed_keys.is_empty() {
+                    return Ok(());
+                }
+                let sleep_duration = compute_idle_sleep(&config, now, plan.next_due_at)?;
+                let next_check_at = advance_time(now, sleep_duration)?;
+                {
+                    let mut status = self.status.write().await;
+                    status.next_wake_at = Some(next_check_at.to_rfc3339());
+                    status.wait_reason = Some("idle_sleep".to_string());
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(sleep_duration) => {}
+                    _ = self.notify.notified() => {}
+                }
+                return Ok(());
+            };
+
+            if processed_keys.is_empty() {
+                let _ = self.logger.runtime(
+                    "info",
+                    format!(
+                        "scheduler picked {} due credential(s); next_due_at={}",
+                        plan.due_keys.len(),
+                        plan.next_due_at
+                            .as_ref()
+                            .map(DateTime::to_rfc3339)
+                            .unwrap_or_else(|| "none".to_string())
+                    ),
+                );
             }
-            return Ok(());
-        }
 
-        let _ = self.logger.runtime(
-            "info",
-            format!(
-                "scheduler picked {} due credential(s); next_due_at={}",
-                plan.due_keys.len(),
-                plan.next_due_at
-                    .as_ref()
-                    .map(DateTime::to_rfc3339)
-                    .unwrap_or_else(|| "none".to_string())
-            ),
-        );
-
-        for (index, key) in plan.due_keys.iter().enumerate() {
             if !self.enabled.load(Ordering::SeqCst) {
-                break;
+                return Ok(());
             }
-            let queued_next_key = plan.due_keys.get(index + 1).cloned();
+            let key = due_entry.key.clone();
             {
                 let mut status = self.status.write().await;
                 status.current_key = Some(key.clone());
-                status.next_key = queued_next_key
-                    .clone()
+                status.next_key = plan
+                    .due_keys
+                    .iter()
+                    .skip(index + 1)
+                    .find(|entry| !processed_keys.contains(&entry.key))
+                    .map(|entry| entry.key.clone())
                     .or_else(|| plan.next_future_key.clone());
                 status.last_error = None;
                 status.next_wake_at = None;
                 status.wait_reason = None;
             }
+            drop(plan);
             let outcome = self
                 .transaction
                 .refresh_one(
                     &config,
                     CredentialZone::Normal,
-                    key,
+                    &key,
                     crate::transaction::RefreshTrigger::Scheduler,
                 )
                 .await?;
+            processed_keys.insert(key);
             if outcome.success
                 && let Some(backup) = &self.backup
             {
@@ -381,15 +401,16 @@ impl SchedulerRuntime {
             }
             self.update_backoff(&config, &outcome).await?;
             let latest_plan = self.collect_schedule_plan(&config, Utc::now()).await?;
+            let latest_next_key = latest_plan.next_key_excluding(&processed_keys);
             {
                 let mut status = self.status.write().await;
                 status.current_key = None;
-                status.next_key = queued_next_key.clone().or_else(|| latest_plan.next_key());
+                status.next_key = latest_next_key.clone();
                 status.next_due_at = latest_plan.next_due_at_rfc3339();
             }
             if !self.enabled.load(Ordering::SeqCst) || self.manual_requested.load(Ordering::SeqCst)
             {
-                break;
+                return Ok(());
             }
             let delay = random_delay(
                 parse_duration_str(&config.refresh.inter_refresh_delay_min)?,
@@ -404,7 +425,7 @@ impl SchedulerRuntime {
             let wake_requested = self
                 .wait_inter_refresh_delay(
                     next_check_at,
-                    queued_next_key.clone().or_else(|| latest_plan.next_key()),
+                    latest_next_key,
                     latest_plan.future_due.as_slice(),
                 )
                 .await?;
@@ -414,12 +435,9 @@ impl SchedulerRuntime {
                 status.wait_reason = None;
             }
             if wake_requested {
-                // Re-run planning with the latest config/state instead of continuing
-                // a batch that was computed before the wake-up event.
                 return Ok(());
             }
         }
-        Ok(())
     }
 
     async fn collect_schedule_plan(
@@ -600,10 +618,17 @@ impl SchedulerRuntime {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SchedulePlan {
-    due_keys: Vec<String>,
+    due_keys: Vec<DueEntry>,
     next_future_key: Option<String>,
     next_due_at: Option<DateTime<Utc>>,
     future_due: Vec<FutureDueEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DueEntry {
+    key: String,
+    due_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -616,8 +641,16 @@ impl SchedulePlan {
     fn next_key(&self) -> Option<String> {
         self.due_keys
             .first()
-            .cloned()
+            .map(|entry| entry.key.clone())
             .or_else(|| self.next_future_key.clone())
+    }
+
+    fn next_key_excluding(&self, processed_keys: &HashSet<String>) -> Option<String> {
+        self.due_keys
+            .iter()
+            .find(|entry| !processed_keys.contains(&entry.key))
+            .map(|entry| entry.key.clone())
+            .or_else(|| self.next_key())
     }
 
     fn next_due_at_rfc3339(&self) -> Option<String> {
@@ -637,6 +670,10 @@ fn collect_schedule_plan(
     let mut future_due = Vec::new();
     for entry in entries {
         let key = entry.key.clone();
+        let expires_at = entry
+            .credential
+            .as_ref()
+            .and_then(|value| value.expires_at());
         let due = if let Some(credential) = entry.credential.as_ref() {
             due_at(config, credential, now)?.unwrap_or(now)
         } else {
@@ -649,7 +686,11 @@ fn collect_schedule_plan(
             .chain(backoff_map.get(&key).copied())
             .fold(due, |current, value| current.max(value));
         if scheduled_time <= now {
-            due_keys.push(key);
+            due_keys.push(DueEntry {
+                key,
+                due_at: scheduled_time,
+                expires_at,
+            });
             continue;
         }
         future_due.push(FutureDueEntry {
@@ -657,7 +698,15 @@ fn collect_schedule_plan(
             due_at: scheduled_time,
         });
     }
-    due_keys.sort();
+    due_keys.sort_by(|left, right| {
+        match (left.expires_at, right.expires_at) {
+            (Some(left_expiry), Some(right_expiry)) => left_expiry.cmp(&right_expiry),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.due_at.cmp(&right.due_at),
+        }
+        .then_with(|| left.key.cmp(&right.key))
+    });
     future_due.sort_by(|left, right| {
         left.due_at
             .cmp(&right.due_at)
@@ -869,6 +918,18 @@ mod tests {
         assert!(wake_requested);
     }
 
+    #[tokio::test]
+    async fn wake_before_waiting_is_not_lost() {
+        let temp = tempdir().unwrap();
+        let handle = SchedulerHandle::load(temp.path().join("scheduler_state.json")).unwrap();
+
+        handle.wake();
+
+        tokio::time::timeout(Duration::from_millis(50), handle.notify.notified())
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn collect_schedule_plan_prefers_due_queue_then_earliest_future_key() {
         let temp = tempdir().unwrap();
@@ -902,7 +963,7 @@ mod tests {
         let plan =
             collect_schedule_plan(&config, &store, &status_store, &HashMap::new(), now).unwrap();
 
-        assert_eq!(plan.due_keys, vec!["zeta.json".to_string()]);
+        assert_eq!(plan.due_keys[0].key, "zeta.json");
         assert_eq!(plan.next_future_key.as_deref(), Some("alpha.json"));
         assert_eq!(plan.next_key().as_deref(), Some("zeta.json"));
         assert_eq!(
@@ -948,6 +1009,146 @@ mod tests {
             plan.next_due_at,
             Some(parse_rfc3339("2026-05-26T12:10:00Z").unwrap())
         );
+    }
+
+    #[test]
+    fn due_credentials_prioritize_expiry_then_unknown_due_time_and_key() {
+        let temp = tempdir().unwrap();
+        let (mut config, store, status_store) = test_schedule_components(temp.path());
+        config.refresh.interval = "1h".to_string();
+        config.refresh.lead_time = "1h".to_string();
+
+        for (key, last_refresh, expired) in [
+            (
+                "alpha.json",
+                "2026-05-26T10:30:00Z",
+                Some("2030-01-01T00:00:00Z"),
+            ),
+            (
+                "zeta.json",
+                "2026-05-26T10:30:00Z",
+                Some("2026-05-26T12:20:00Z"),
+            ),
+            (
+                "beta.json",
+                "2026-05-26T10:30:00Z",
+                Some("2026-05-26T12:20:00Z"),
+            ),
+            ("unknown-late.json", "2026-05-26T10:40:00Z", None),
+            ("unknown-early.json", "2026-05-26T10:20:00Z", None),
+        ] {
+            let mut credential = test_credential(last_refresh);
+            credential.expired = expired.map(str::to_string);
+            store
+                .write_credential(CredentialZone::Normal, key, &credential)
+                .unwrap();
+        }
+
+        let now = Utc.with_ymd_and_hms(2026, 5, 26, 12, 0, 0).unwrap();
+        let plan =
+            collect_schedule_plan(&config, &store, &status_store, &HashMap::new(), now).unwrap();
+        let keys = plan
+            .due_keys
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            [
+                "beta.json",
+                "zeta.json",
+                "alpha.json",
+                "unknown-early.json",
+                "unknown-late.json",
+            ]
+        );
+        assert_eq!(plan.next_key().as_deref(), Some("beta.json"));
+
+        let mut processed = HashSet::new();
+        processed.insert("beta.json".to_string());
+        assert_eq!(
+            plan.next_key_excluding(&processed).as_deref(),
+            Some("zeta.json")
+        );
+        processed.extend(keys.into_iter().map(str::to_string));
+        assert_eq!(
+            plan.next_key_excluding(&processed).as_deref(),
+            Some("beta.json")
+        );
+    }
+
+    #[test]
+    fn replanning_picks_newly_due_urgent_credential() {
+        let temp = tempdir().unwrap();
+        let (mut config, store, status_store) = test_schedule_components(temp.path());
+        config.refresh.interval = "1h".to_string();
+        config.refresh.lead_time = "15m".to_string();
+
+        store
+            .write_credential(
+                CredentialZone::Normal,
+                "far.json",
+                &test_credential("2026-05-26T10:30:00Z"),
+            )
+            .unwrap();
+        let mut urgent = test_credential("2026-05-26T11:00:30Z");
+        urgent.expired = Some("2026-05-26T12:30:00Z".to_string());
+        store
+            .write_credential(CredentialZone::Normal, "urgent.json", &urgent)
+            .unwrap();
+
+        let before_delay = Utc.with_ymd_and_hms(2026, 5, 26, 12, 0, 0).unwrap();
+        let before = collect_schedule_plan(
+            &config,
+            &store,
+            &status_store,
+            &HashMap::new(),
+            before_delay,
+        )
+        .unwrap();
+        assert_eq!(before.next_key().as_deref(), Some("far.json"));
+        assert_eq!(before.next_future_key.as_deref(), Some("urgent.json"));
+
+        let after_delay = Utc.with_ymd_and_hms(2026, 5, 26, 12, 1, 0).unwrap();
+        let after =
+            collect_schedule_plan(&config, &store, &status_store, &HashMap::new(), after_delay)
+                .unwrap();
+        assert_eq!(after.next_key().as_deref(), Some("urgent.json"));
+    }
+
+    #[test]
+    fn replanning_reflects_added_and_deleted_credentials() {
+        let temp = tempdir().unwrap();
+        let (mut config, store, status_store) = test_schedule_components(temp.path());
+        config.refresh.interval = "1h".to_string();
+        config.refresh.lead_time = "1h".to_string();
+        let now = Utc.with_ymd_and_hms(2026, 5, 26, 12, 0, 0).unwrap();
+
+        store
+            .write_credential(
+                CredentialZone::Normal,
+                "far.json",
+                &test_credential("2026-05-26T10:30:00Z"),
+            )
+            .unwrap();
+        let first =
+            collect_schedule_plan(&config, &store, &status_store, &HashMap::new(), now).unwrap();
+        assert_eq!(first.next_key().as_deref(), Some("far.json"));
+
+        let mut urgent = test_credential("2026-05-26T10:30:00Z");
+        urgent.expired = Some("2026-05-26T12:20:00Z".to_string());
+        store
+            .write_credential(CredentialZone::Normal, "urgent.json", &urgent)
+            .unwrap();
+        let after_add =
+            collect_schedule_plan(&config, &store, &status_store, &HashMap::new(), now).unwrap();
+        assert_eq!(after_add.next_key().as_deref(), Some("urgent.json"));
+
+        store.delete(CredentialZone::Normal, "urgent.json").unwrap();
+        let after_delete =
+            collect_schedule_plan(&config, &store, &status_store, &HashMap::new(), now).unwrap();
+        assert_eq!(after_delete.next_key().as_deref(), Some("far.json"));
     }
 
     fn test_schedule_components(

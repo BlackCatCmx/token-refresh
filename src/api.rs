@@ -26,6 +26,7 @@ use crate::import::{
 use crate::logging::LogKind;
 use crate::migration_archive::{self, MigrationArchiveInput, MigrationRestoreSummary};
 use crate::web::{AppState, app_css, dashboard_js, dashboard_page, login_js, login_page};
+use crate::write_coordinator::WriteCoordinator;
 
 const LOG_LINE_LIMIT: usize = 50;
 
@@ -292,11 +293,17 @@ fn build_credential_views(state: &AppState, zone: CredentialZone) -> Result<Vec<
     Ok(items)
 }
 
-async fn acquire_write_guard(state: &AppState) -> Result<tokio::sync::OwnedMutexGuard<()>> {
-    state.write_coordinator.ensure_writes_allowed()?;
-    let guard = state.write_coordinator.lock_commit().await;
-    state.write_coordinator.ensure_writes_allowed()?;
-    Ok(guard)
+async fn acquire_write_guard(
+    coordinator: &WriteCoordinator,
+) -> Result<(
+    tokio::sync::OwnedMutexGuard<()>,
+    tokio::sync::OwnedMutexGuard<()>,
+)> {
+    coordinator.ensure_writes_allowed()?;
+    let activity_guard = coordinator.lock_activity().await;
+    let commit_guard = coordinator.lock_commit().await;
+    coordinator.ensure_writes_allowed()?;
+    Ok((activity_guard, commit_guard))
 }
 
 async fn import_json_credentials(
@@ -312,7 +319,7 @@ async fn import_json_credentials(
         Ok(files) => files,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     };
-    let _commit_guard = match acquire_write_guard(&state).await {
+    let _write_guards = match acquire_write_guard(&state.write_coordinator).await {
         Ok(guard) => guard,
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
@@ -375,7 +382,7 @@ async fn import_zip_credentials(
         Ok(bytes) => bytes,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     };
-    let _commit_guard = match acquire_write_guard(&state).await {
+    let _write_guards = match acquire_write_guard(&state.write_coordinator).await {
         Ok(guard) => guard,
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
@@ -418,7 +425,7 @@ async fn patch_credential_user_agents(state: Arc<AppState>, mode: UserAgentPatch
         .effective_config()
         .await
         .request_identity;
-    let _commit_guard = match acquire_write_guard(&state).await {
+    let _write_guards = match acquire_write_guard(&state.write_coordinator).await {
         Ok(guard) => guard,
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
@@ -513,7 +520,7 @@ async fn restore_credentials(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<NamesRequest>,
 ) -> Response {
-    let _commit_guard = match acquire_write_guard(&state).await {
+    let _write_guards = match acquire_write_guard(&state.write_coordinator).await {
         Ok(guard) => guard,
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
@@ -551,7 +558,7 @@ async fn clear_cpa_exhausted_credentials(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<NamesRequest>,
 ) -> Response {
-    let _commit_guard = match acquire_write_guard(&state).await {
+    let _write_guards = match acquire_write_guard(&state.write_coordinator).await {
         Ok(guard) => guard,
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
@@ -582,7 +589,7 @@ async fn delete_credentials(
         Ok(zone) => zone,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     };
-    let _commit_guard = match acquire_write_guard(&state).await {
+    let _write_guards = match acquire_write_guard(&state.write_coordinator).await {
         Ok(guard) => guard,
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
@@ -724,7 +731,7 @@ async fn update_credential_content(
     if let Err(err) = validate_credential_content(&payload.content) {
         return json_error(StatusCode::BAD_REQUEST, &err.to_string());
     }
-    let _commit_guard = match acquire_write_guard(&state).await {
+    let _write_guards = match acquire_write_guard(&state.write_coordinator).await {
         Ok(guard) => guard,
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
@@ -1691,6 +1698,53 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
     use crate::status::CredentialStatusStore;
+
+    #[tokio::test]
+    async fn deleting_during_refresh_cannot_restore_a_deleted_credential() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("credentials");
+        config.abnormal_credentials_dir = temp.path().join("credentials_abnormal");
+        let store = Arc::new(CredentialStore::new(&config, None).unwrap());
+        let coordinator = Arc::new(WriteCoordinator::new());
+        let credential = CodexCredentialFile {
+            provider_type: "codex".to_string(),
+            refresh_token: "refresh".to_string(),
+            ..CodexCredentialFile::default()
+        };
+        store
+            .write_credential(CredentialZone::Normal, "account.json", &credential)
+            .unwrap();
+
+        let activity_guard = coordinator.lock_activity().await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let delete_store = store.clone();
+        let delete_coordinator = coordinator.clone();
+        let mut deletion = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            let _write_guards = acquire_write_guard(&delete_coordinator).await.unwrap();
+            delete_store
+                .delete(CredentialZone::Normal, "account.json")
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut deletion)
+                .await
+                .is_err()
+        );
+
+        store
+            .write_credential(CredentialZone::Normal, "account.json", &credential)
+            .unwrap();
+        drop(activity_guard);
+        deletion.await.unwrap();
+        assert!(
+            store
+                .read_entry(CredentialZone::Normal, "account.json")
+                .is_err()
+        );
+    }
 
     #[test]
     fn validate_credential_content_accepts_valid_codex_json() {
