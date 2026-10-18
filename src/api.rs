@@ -323,18 +323,20 @@ async fn import_json_credentials(
         Ok(guard) => guard,
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
-    match import_json_files(&state.store, files, &user_agent_list) {
-        Ok(imported) => {
-            let _ = state.logger.runtime(
-                "info",
-                format!("imported {} JSON credential file(s)", imported.len()),
-            );
-            state.backup.mark_dirty("import_json_credentials");
-            state.scheduler.wake();
-            Json(serde_json::json!({ "imported": imported })).into_response()
-        }
-        Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+    let summary = import_json_files(&state.store, files, &user_agent_list);
+    let _ = state.logger.runtime(
+        "info",
+        format!(
+            "JSON credential import: {} imported, {} failed",
+            summary.imported.len(),
+            summary.failed.len()
+        ),
+    );
+    if !summary.imported.is_empty() {
+        state.backup.mark_dirty("import_json_credentials");
+        state.scheduler.wake();
     }
+    Json(summary).into_response()
 }
 
 async fn collect_json_files(multipart: &mut Multipart) -> Result<Vec<ImportedFile>> {
@@ -387,14 +389,20 @@ async fn import_zip_credentials(
         Err(err) => return json_error(StatusCode::CONFLICT, &err.to_string()),
     };
     match import_zip(&state.store, &bytes, &user_agent_list) {
-        Ok(imported) => {
+        Ok(summary) => {
             let _ = state.logger.runtime(
                 "info",
-                format!("imported {} credential file(s) from ZIP", imported.len()),
+                format!(
+                    "ZIP credential import: {} imported, {} failed",
+                    summary.imported.len(),
+                    summary.failed.len()
+                ),
             );
-            state.backup.mark_dirty("import_zip_credentials");
-            state.scheduler.wake();
-            Json(serde_json::json!({ "imported": imported })).into_response()
+            if !summary.imported.is_empty() {
+                state.backup.mark_dirty("import_zip_credentials");
+                state.scheduler.wake();
+            }
+            Json(summary).into_response()
         }
         Err(err) => json_error(StatusCode::BAD_REQUEST, &err.to_string()),
     }

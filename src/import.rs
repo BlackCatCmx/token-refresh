@@ -1,6 +1,7 @@
 use std::io::{Cursor, Read};
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use zip::ZipArchive;
 
 use crate::config::RequestIdentityConfig;
@@ -13,6 +14,18 @@ pub struct ImportedFile {
     pub name: String,
     pub bytes: Vec<u8>,
     pub zone: CredentialZone,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ImportSummary {
+    pub imported: Vec<String>,
+    pub failed: Vec<ImportFailure>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportFailure {
+    pub name: String,
+    pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,25 +46,34 @@ pub fn import_json_files(
     store: &CredentialStore,
     files: Vec<ImportedFile>,
     request_identity: &RequestIdentityConfig,
-) -> Result<Vec<String>> {
-    let mut imported = Vec::new();
+) -> ImportSummary {
+    let mut summary = ImportSummary::default();
     for file in files {
-        let mut credential: CodexCredentialFile = serde_json::from_slice(&file.bytes)
-            .with_context(|| format!("invalid JSON credential: {}", file.name))?;
-        if !credential.is_codex() {
-            bail!("only type=codex credentials are supported: {}", file.name);
+        let result: Result<String> = (|| {
+            let mut credential: CodexCredentialFile = serde_json::from_slice(&file.bytes)
+                .with_context(|| format!("invalid JSON credential: {}", file.name))?;
+            if !credential.is_codex() {
+                bail!("only type=codex credentials are supported: {}", file.name);
+            }
+            ensure_user_agent(&mut credential, request_identity)?;
+            store.import_credential(file.zone, &file.name, &credential)
+        })();
+        match result {
+            Ok(key) => summary.imported.push(key),
+            Err(err) => summary.failed.push(ImportFailure {
+                name: file.name,
+                message: format!("{err:#}"),
+            }),
         }
-        ensure_user_agent(&mut credential, request_identity)?;
-        imported.push(store.import_credential(file.zone, &file.name, &credential)?);
     }
-    Ok(imported)
+    summary
 }
 
 pub fn import_zip(
     store: &CredentialStore,
     bytes: &[u8],
     request_identity: &RequestIdentityConfig,
-) -> Result<Vec<String>> {
+) -> Result<ImportSummary> {
     let cursor = Cursor::new(bytes);
     let mut archive = ZipArchive::new(cursor).context("invalid ZIP archive")?;
     let mut files = Vec::new();
@@ -87,7 +109,10 @@ pub fn import_zip(
             zone,
         });
     }
-    import_json_files(store, files, request_identity)
+    if files.is_empty() {
+        bail!("ZIP 中没有 JSON 凭证文件");
+    }
+    Ok(import_json_files(store, files, request_identity))
 }
 
 fn ensure_user_agent(
@@ -203,6 +228,93 @@ mod tests {
     }
 
     #[test]
+    fn json_import_continues_after_invalid_credentials_and_write_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("normal");
+        config.abnormal_credentials_dir = temp.path().join("abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        std::fs::create_dir(config.credentials_dir.join("blocked.json")).unwrap();
+        let valid = br#"{"type":"codex","refresh_token":"refresh"}"#;
+        let files = [
+            ("first.json", valid.as_slice()),
+            ("broken.json", b"invalid".as_slice()),
+            ("other.json", br#"{"type":"other"}"#.as_slice()),
+            ("blocked.json", valid.as_slice()),
+            ("last.json", valid.as_slice()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| ImportedFile {
+            name: name.to_string(),
+            bytes: bytes.to_vec(),
+            zone: CredentialZone::Normal,
+        })
+        .collect();
+        let summary = import_json_files(&store, files, &request_identity_with_list(""));
+        assert_eq!(summary.imported, ["first.json", "last.json"]);
+        assert_eq!(
+            summary
+                .failed
+                .iter()
+                .map(|failure| failure.name.as_str())
+                .collect::<Vec<_>>(),
+            ["broken.json", "other.json", "blocked.json"]
+        );
+        assert!(
+            summary
+                .failed
+                .iter()
+                .all(|failure| !failure.message.is_empty())
+        );
+        assert!(
+            store
+                .read_entry(CredentialZone::Normal, "last.json")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn zip_import_reports_failures_and_continues_in_both_zones() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("normal");
+        config.abnormal_credentials_dir = temp.path().join("abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, content) in [
+            ("normal/first.json", r#"{"type":"codex"}"#),
+            ("normal/broken.json", "invalid"),
+            ("../outside.json", r#"{"type":"codex"}"#),
+            ("abnormal/last.json", r#"{"type":"codex"}"#),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(content.as_bytes()).unwrap();
+        }
+        let bytes = writer.finish().unwrap().into_inner();
+        let summary = import_zip(&store, &bytes, &request_identity_with_list("")).unwrap();
+        assert_eq!(summary.imported, ["first.json", "last.json"]);
+        assert_eq!(summary.failed.len(), 2);
+        assert!(
+            store
+                .read_entry(CredentialZone::Normal, "first.json")
+                .is_ok()
+        );
+        assert!(
+            store
+                .read_entry(CredentialZone::Abnormal, "last.json")
+                .is_ok()
+        );
+        assert!(!temp.path().join("outside.json").exists());
+
+        let empty = zip::ZipWriter::new(Cursor::new(Vec::new()))
+            .finish()
+            .unwrap()
+            .into_inner();
+        assert!(import_zip(&store, &empty, &request_identity_with_list("")).is_err());
+    }
+
+    #[test]
     fn zip_import_respects_abnormal_prefix() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = AppConfig::default();
@@ -236,7 +348,8 @@ mod tests {
             &request_identity_with_list(crate::user_agent::DEFAULT_USER_AGENT),
         )
         .unwrap();
-        assert_eq!(imported, vec!["user@example.com.json".to_string()]);
+        assert_eq!(imported.imported, vec!["user@example.com.json".to_string()]);
+        assert!(imported.failed.is_empty());
         assert!(
             config
                 .abnormal_credentials_dir
@@ -267,7 +380,11 @@ mod tests {
             zone: CredentialZone::Normal,
         }];
 
-        import_json_files(&store, files, &request_identity_with_list("")).unwrap();
+        assert!(
+            import_json_files(&store, files, &request_identity_with_list(""))
+                .failed
+                .is_empty()
+        );
         let entry = store
             .read_entry(CredentialZone::Normal, "user@example.com.json")
             .unwrap();
@@ -303,7 +420,11 @@ mod tests {
             zone: CredentialZone::Normal,
         }];
 
-        import_json_files(&store, files, &request_identity_with_list("pool-ua")).unwrap();
+        assert!(
+            import_json_files(&store, files, &request_identity_with_list("pool-ua"))
+                .failed
+                .is_empty()
+        );
         let entry = store
             .read_entry(CredentialZone::Normal, "user@example.com.json")
             .unwrap();
@@ -512,7 +633,11 @@ mod tests {
             zone: CredentialZone::Normal,
         }];
 
-        import_json_files(&store, files, &generated_request_identity()).unwrap();
+        assert!(
+            import_json_files(&store, files, &generated_request_identity())
+                .failed
+                .is_empty()
+        );
         let user_agent = store
             .read_entry(CredentialZone::Normal, "user@example.com.json")
             .unwrap()

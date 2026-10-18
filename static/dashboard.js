@@ -26,10 +26,10 @@ const ABNORMAL_LOG_CODES = [
   "invalid_user_agent",
 ];
 
-async function api(url, options = {}) {
+async function api(url, { reloadOnUnauthorized = true, ...options } = {}) {
   const response = await fetch(url, options);
   if (response.status === 401) {
-    location.reload();
+    if (reloadOnUnauthorized) location.reload();
     throw new Error("未登录");
   }
   if (!response.ok) {
@@ -88,8 +88,8 @@ function normalizeBackupRemote(remote = {}) {
   };
 }
 
-async function loadScheduler() {
-  const data = await api("api/scheduler/status");
+async function loadScheduler(reloadOnUnauthorized = true) {
+  const data = await api("api/scheduler/status", { reloadOnUnauthorized });
   const container = document.getElementById("scheduler-status");
   const manualState = data.manual_running ? "执行中" : data.manual_pending ? "排队中" : "空闲";
   const manualStateClass = data.manual_running || data.manual_pending ? "status-on" : "status-off";
@@ -160,8 +160,8 @@ async function loadScheduler() {
   schedulerManualActive = manualBusy;
 }
 
-async function loadBackupStatus() {
-  const data = await api("api/backup/status");
+async function loadBackupStatus(reloadOnUnauthorized = true) {
+  const data = await api("api/backup/status", { reloadOnUnauthorized });
   backupStatusCache = data;
 
   function v(text, cls) {
@@ -569,8 +569,8 @@ async function saveSettings() {
   }
 }
 
-async function loadCredentials(zone) {
-  const data = await api(`api/credentials?zone=${zone}`);
+async function loadCredentials(zone, reloadOnUnauthorized = true) {
+  const data = await api(`api/credentials?zone=${zone}`, { reloadOnUnauthorized });
   const selected = credState[zone].selected;
   const validNames = new Set(data.items.map((item) => item.name));
   credState[zone].data = data.items;
@@ -1399,7 +1399,169 @@ async function submitMigrationImport() {
   }
 }
 
+const credentialImportState = { running: false, zip: false, items: [], request: null, stopped: false };
+
+function renderCredentialImport() {
+  const { running, zip, items } = credentialImportState;
+  const labels = { pending: "未上传", uploading: "上传中", success: "成功", failed: "失败", unknown: "结果待确认" };
+  document.getElementById("credential-import").classList.remove("hidden");
+  document.getElementById("upload-btn").disabled = running;
+  document.getElementById("upload-files").disabled = running;
+  document.getElementById("upload-btn").textContent = running ? "上传执行中" : "上传凭证";
+  const count = (status) => items.filter((item) => item.status === status).length;
+  document.getElementById("credential-import-summary").textContent =
+    `已处理 ${count("success") + count("failed") + count("unknown")}/${items.length}：成功 ${count("success")}，失败 ${count("failed")}，待确认 ${count("unknown")}，未上传 ${count("pending")}`;
+  const details = document.getElementById("credential-import-details");
+  details.classList.toggle("hidden", running);
+  if (!running) {
+    details.open = items.some((item) => item.status !== "success");
+    document.getElementById("credential-import-results").innerHTML = items.map((item) =>
+      `<li${item.status === "failed" || item.status === "unknown" ? ' class="danger-text"' : ""}>${escapeHtml(item.name)}：${labels[item.status]}${item.message ? ` — ${escapeHtml(item.message)}` : ""}</li>`
+    ).join("");
+  }
+  const retry = document.getElementById("credential-import-retry");
+  retry.classList.toggle("hidden", zip || items.every((item) => item.status === "success"));
+  retry.disabled = running;
+  document.getElementById("credential-import-stop").classList.toggle("hidden", !running || !credentialImportState.request);
+}
+
+function stopCredentialImports() {
+  if (!credentialImportState.running || !credentialImportState.request) return;
+  credentialImportState.stopped = true;
+  credentialImportState.request.abort();
+}
+
+function uploadCredentialFile(file, zip, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const fail = (message, unknown = true) => {
+      const error = new Error(message);
+      error.unknown = unknown;
+      error.unauthorized = xhr.status === 401;
+      reject(error);
+    };
+    xhr.open("POST", zip ? "api/credentials/import-zip" : "api/credentials/import-json");
+    xhr.upload.onprogress = (event) => onProgress(event.lengthComputable ? Math.floor(event.loaded / event.total * 100) : null);
+    xhr.upload.onload = () => onProgress(100);
+    xhr.onerror = () => fail("网络连接中断，服务端可能已经导入；请核对凭证列表");
+    xhr.onabort = () => fail("已停止等待，服务端可能已经导入；请核对凭证列表");
+    xhr.onload = () => {
+      let data;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        fail(`无法读取服务端响应（HTTP ${xhr.status}），请核对凭证列表`, xhr.status < 400 || xhr.status >= 500);
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        fail(data.message || `请求失败（HTTP ${xhr.status}）`, xhr.status >= 500);
+        return;
+      }
+      if (!Array.isArray(data.imported) || !Array.isArray(data.failed)) {
+        fail("服务端响应缺少导入结果，请核对凭证列表");
+        return;
+      }
+      resolve(data);
+    };
+    const form = new FormData();
+    form.append(zip ? "file" : "files", file, file.name);
+    credentialImportState.request = xhr;
+    renderCredentialImport();
+    xhr.send(form);
+  }).finally(() => {
+    credentialImportState.request = null;
+  });
+}
+
+async function runCredentialImports(items) {
+  credentialImportState.running = true;
+  credentialImportState.stopped = false;
+  const status = document.getElementById("credential-import-status");
+  const progress = document.getElementById("credential-import-progress");
+  let unauthorized = false;
+  document.getElementById("credential-import-refresh-error").textContent = "";
+  renderCredentialImport();
+  try {
+    for (const [index, item] of items.entries()) {
+      if (credentialImportState.stopped) break;
+      item.status = "uploading";
+      item.message = "";
+      progress.value = 0;
+      status.textContent = `正在上传 ${index + 1}/${items.length}：${item.name}`;
+      renderCredentialImport();
+      try {
+        const data = await uploadCredentialFile(item.file, credentialImportState.zip, (percent) => {
+          if (percent === null) progress.removeAttribute("value");
+          else progress.value = percent;
+          status.textContent = percent === 100
+            ? `已上传，服务端处理中 ${index + 1}/${items.length}：${item.name}`
+            : `正在上传 ${index + 1}/${items.length}：${item.name}${percent === null ? "" : `（${percent}%）`}`;
+        });
+        if (credentialImportState.zip) {
+          credentialImportState.items = [
+            ...data.imported.map((name) => ({ name, status: "success" })),
+            ...data.failed.map((failure) => ({ name: failure.name, status: "failed", message: failure.message })),
+          ];
+        } else if (data.failed.length) {
+          item.status = "failed";
+          item.message = data.failed.map((failure) => failure.message).join("；");
+        } else if (data.imported.length === 1) {
+          item.status = "success";
+        } else {
+          item.status = "unknown";
+          item.message = "服务端未返回该文件的导入结果，请核对凭证列表";
+        }
+      } catch (error) {
+        item.status = error.unknown ? "unknown" : "failed";
+        item.message = error.message;
+        if (error.unauthorized) {
+          unauthorized = true;
+          item.message = "登录已失效，请重新登录后再上传";
+          break;
+        }
+      }
+      renderCredentialImport();
+    }
+    status.textContent = credentialImportState.stopped
+      ? "本轮上传已停止；当前请求结果待确认。停止等待不会撤销服务端已执行的导入，请手动刷新页面数据核对。"
+      : credentialImportState.zip
+      ? "ZIP 请求已结束；失败项请修正后重新上传，重新上传可能覆盖同名凭证。"
+      : "本轮上传已结束；可重试未成功文件。关闭或刷新页面会清除本次结果及重试列表。";
+    progress.classList.add("hidden");
+    if (!unauthorized && !credentialImportState.stopped) {
+      try {
+        await Promise.all([
+          loadCredentials("normal", false),
+          loadCredentials("abnormal", false),
+          loadBackupStatus(false),
+          loadScheduler(false),
+          reloadLog("runtime", false),
+        ]);
+      } catch (error) {
+        document.getElementById("credential-import-refresh-error").textContent = `页面数据刷新失败：${error.message}。上方导入结果已保留。`;
+      }
+    }
+  } finally {
+    credentialImportState.running = false;
+    renderCredentialImport();
+  }
+}
+
+async function retryCredentialImports() {
+  if (credentialImportState.running || credentialImportState.zip) return;
+  const items = credentialImportState.items.filter((item) => item.status !== "success");
+  if (!items.length) return;
+  if (!confirm("将重试未成功文件，可能覆盖服务端同名凭证。结果待确认的文件可能已经导入，请先核对凭证列表。确认重试吗？")) return;
+  for (const item of items) {
+    item.status = "pending";
+    item.message = "";
+  }
+  document.getElementById("credential-import-progress").classList.remove("hidden");
+  await runCredentialImports(items);
+}
+
 async function importFiles() {
+  if (credentialImportState.running) return;
   const input = document.getElementById("upload-files");
   if (!input.files.length) return alert("请选择文件");
   const files = Array.from(input.files);
@@ -1412,18 +1574,13 @@ async function importFiles() {
   if (zips.length > 1) {
     return alert("一次只能上传一个 ZIP 文件");
   }
-  if (zips.length === 1) {
-    const form = new FormData();
-    form.append("file", zips[0], zips[0].name);
-    await api("api/credentials/import-zip", { method: "POST", body: form });
-  } else if (jsons.length > 0) {
-    const form = new FormData();
-    for (const f of jsons) form.append("files", f, f.name);
-    await api("api/credentials/import-json", { method: "POST", body: form });
-  } else {
+  if (zips.length + jsons.length !== files.length) {
     return alert("请选择 .json 或 .zip 文件");
   }
-  await refreshAll();
+  credentialImportState.zip = zips.length === 1;
+  credentialImportState.items = files.map((file) => ({ file, name: file.name, status: "pending", message: "" }));
+  document.getElementById("credential-import-progress").classList.remove("hidden");
+  await runCredentialImports(credentialImportState.items);
 }
 
 function formatUserAgentPatchMessage(actionLabel, data) {
@@ -1741,8 +1898,8 @@ async function runCpaInspectOnce() {
   }
 }
 
-async function reloadLog(kind) {
-  const data = await api(`api/logs?kind=${kind}&limit=${LOG_LINE_LIMIT}`);
+async function reloadLog(kind, reloadOnUnauthorized = true) {
+  const data = await api(`api/logs?kind=${kind}&limit=${LOG_LINE_LIMIT}`, { reloadOnUnauthorized });
   const content = data.content || "";
   if (kind === "audit") {
     auditLogContent = content;
@@ -1895,6 +2052,8 @@ window.openCredentialEditor = openCredentialEditor;
 window.closeCredentialEditor = closeCredentialEditor;
 window.saveCredentialEditor = saveCredentialEditor;
 window.importFiles = importFiles;
+window.retryCredentialImports = retryCredentialImports;
+window.stopCredentialImports = stopCredentialImports;
 window.fillMissingUserAgents = fillMissingUserAgents;
 window.reassignCliVersions = reassignCliVersions;
 window.reassignAllUserAgents = reassignAllUserAgents;

@@ -122,6 +122,12 @@ section {
 }
 
 /* ── Toolbar ── */
+#credential-import { margin: 12px 0; overflow-wrap: anywhere; }
+#credential-import.hidden, #credential-import .hidden { display: none; }
+#credential-import-progress { width: 100%; margin: 8px 0; }
+#credential-import-results { max-height: 240px; overflow-y: auto; padding-left: 24px; }
+#credential-import-retry { margin-top: 8px; }
+
 .toolbar {
   display: flex;
   flex-wrap: wrap;
