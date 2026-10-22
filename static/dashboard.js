@@ -1408,9 +1408,10 @@ function renderCredentialImport() {
   document.getElementById("upload-btn").disabled = running;
   document.getElementById("upload-files").disabled = running;
   document.getElementById("upload-btn").textContent = running ? "上传执行中" : "上传凭证";
-  const count = (status) => items.filter((item) => item.status === status).length;
+  const counts = { pending: 0, uploading: 0, success: 0, failed: 0, unknown: 0 };
+  for (const item of items) counts[item.status] += 1;
   document.getElementById("credential-import-summary").textContent =
-    `已处理 ${count("success") + count("failed") + count("unknown")}/${items.length}：成功 ${count("success")}，失败 ${count("failed")}，待确认 ${count("unknown")}，未上传 ${count("pending")}`;
+    `已处理 ${counts.success + counts.failed + counts.unknown}/${items.length}：成功 ${counts.success}，失败 ${counts.failed}，待确认 ${counts.unknown}，未上传 ${counts.pending}`;
   const details = document.getElementById("credential-import-details");
   details.classList.toggle("hidden", running);
   if (!running) {
@@ -1480,6 +1481,7 @@ async function runCredentialImports(items) {
   const progress = document.getElementById("credential-import-progress");
   let unauthorized = false;
   document.getElementById("credential-import-refresh-error").textContent = "";
+  document.getElementById("credential-import-results").innerHTML = "";
   renderCredentialImport();
   try {
     for (const [index, item] of items.entries()) {
@@ -1519,6 +1521,8 @@ async function runCredentialImports(items) {
           item.message = "登录已失效，请重新登录后再上传";
           break;
         }
+      } finally {
+        if (credentialImportState.zip || item.status === "success") item.file = null;
       }
       renderCredentialImport();
     }
@@ -1580,7 +1584,7 @@ async function importFiles() {
   credentialImportState.zip = zips.length === 1;
   credentialImportState.items = files.map((file) => ({ file, name: file.name, status: "pending", message: "" }));
   document.getElementById("credential-import-progress").classList.remove("hidden");
-  await runCredentialImports(credentialImportState.items);
+  return runCredentialImports(credentialImportState.items);
 }
 
 function formatUserAgentPatchMessage(actionLabel, data) {

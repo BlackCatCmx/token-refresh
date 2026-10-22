@@ -49,16 +49,7 @@ pub fn import_json_files(
 ) -> ImportSummary {
     let mut summary = ImportSummary::default();
     for file in files {
-        let result: Result<String> = (|| {
-            let mut credential: CodexCredentialFile = serde_json::from_slice(&file.bytes)
-                .with_context(|| format!("invalid JSON credential: {}", file.name))?;
-            if !credential.is_codex() {
-                bail!("only type=codex credentials are supported: {}", file.name);
-            }
-            ensure_user_agent(&mut credential, request_identity)?;
-            store.import_credential(file.zone, &file.name, &credential)
-        })();
-        match result {
+        match import_json_file(store, &file, request_identity) {
             Ok(key) => summary.imported.push(key),
             Err(err) => summary.failed.push(ImportFailure {
                 name: file.name,
@@ -69,6 +60,20 @@ pub fn import_json_files(
     summary
 }
 
+fn import_json_file(
+    store: &CredentialStore,
+    file: &ImportedFile,
+    request_identity: &RequestIdentityConfig,
+) -> Result<String> {
+    let mut credential: CodexCredentialFile = serde_json::from_slice(&file.bytes)
+        .with_context(|| format!("invalid JSON credential: {}", file.name))?;
+    if !credential.is_codex() {
+        bail!("only type=codex credentials are supported: {}", file.name);
+    }
+    ensure_user_agent(&mut credential, request_identity)?;
+    store.import_credential(file.zone, &file.name, &credential)
+}
+
 pub fn import_zip(
     store: &CredentialStore,
     bytes: &[u8],
@@ -76,15 +81,12 @@ pub fn import_zip(
 ) -> Result<ImportSummary> {
     let cursor = Cursor::new(bytes);
     let mut archive = ZipArchive::new(cursor).context("invalid ZIP archive")?;
-    let mut files = Vec::new();
+    let mut summary = ImportSummary::default();
     for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
-            .context("failed to read ZIP entry")?;
-        if file.is_dir() {
-            continue;
-        }
-        let name = file.name().replace('\\', "/");
+        let name = archive
+            .name_for_index(index)
+            .context("missing ZIP entry name")?
+            .replace('\\', "/");
         if !name.to_ascii_lowercase().ends_with(".json") {
             continue;
         }
@@ -100,19 +102,35 @@ pub fn import_zip(
         } else {
             name
         };
-        let mut content = Vec::new();
-        file.read_to_end(&mut content)
-            .with_context(|| format!("failed to read ZIP entry {}", file.name()))?;
-        files.push(ImportedFile {
-            name: normalized_name,
-            bytes: content,
-            zone,
-        });
+        let result: Result<String> = (|| {
+            let mut file = archive
+                .by_index(index)
+                .context("failed to open ZIP entry")?;
+            let mut content = Vec::new();
+            file.read_to_end(&mut content)
+                .context("failed to read ZIP entry")?;
+            import_json_file(
+                store,
+                &ImportedFile {
+                    name: normalized_name.clone(),
+                    bytes: content,
+                    zone,
+                },
+                request_identity,
+            )
+        })();
+        match result {
+            Ok(key) => summary.imported.push(key),
+            Err(err) => summary.failed.push(ImportFailure {
+                name: normalized_name,
+                message: format!("{err:#}"),
+            }),
+        }
     }
-    if files.is_empty() {
+    if summary.imported.is_empty() && summary.failed.is_empty() {
         bail!("ZIP 中没有 JSON 凭证文件");
     }
-    Ok(import_json_files(store, files, request_identity))
+    Ok(summary)
 }
 
 fn ensure_user_agent(
@@ -312,6 +330,44 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(import_zip(&store, &empty, &request_identity_with_list("")).is_err());
+    }
+
+    #[test]
+    fn zip_import_reports_corrupt_entry_and_continues() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.credentials_dir = temp.path().join("normal");
+        config.abnormal_credentials_dir = temp.path().join("abnormal");
+        let store = CredentialStore::new(&config, None).unwrap();
+        let corrupt_content = br#"{"type":"codex","refresh_token":"corrupt-entry"}"#;
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, content) in [
+            ("first.json", br#"{"type":"codex"}"#.as_slice()),
+            ("corrupt.json", corrupt_content.as_slice()),
+            ("last.json", br#"{"type":"codex"}"#.as_slice()),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        let mut bytes = writer.finish().unwrap().into_inner();
+        let offset = bytes
+            .windows(corrupt_content.len())
+            .position(|window| window == corrupt_content)
+            .unwrap();
+        bytes[offset] ^= 1;
+
+        let summary = import_zip(&store, &bytes, &request_identity_with_list("")).unwrap();
+        assert_eq!(summary.imported, ["first.json", "last.json"]);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.failed[0].name, "corrupt.json");
+        assert!(
+            summary.failed[0]
+                .message
+                .contains("failed to read ZIP entry")
+        );
+        assert!(!config.credentials_dir.join("corrupt.json").exists());
     }
 
     #[test]

@@ -312,10 +312,10 @@ impl SchedulerRuntime {
     }
 
     async fn run_cycle(&self) -> Result<()> {
-        let config = self.config_manager.effective_config().await;
         // A still-due credential must not monopolize the batch after a refresh.
         let mut processed_keys = HashSet::new();
         loop {
+            let config = self.config_manager.effective_config().await;
             let now = Utc::now();
             let plan = self.collect_schedule_plan(&config, now).await?;
             let next_key = plan.next_key_excluding(&processed_keys);
@@ -458,6 +458,8 @@ impl SchedulerRuntime {
         wait_inter_refresh_delay_state(
             self.notify.as_ref(),
             self.status.as_ref(),
+            self.enabled.as_ref(),
+            self.manual_requested.as_ref(),
             delay_until,
             next_key,
             future_due,
@@ -543,10 +545,7 @@ impl SchedulerRuntime {
                 continue;
             }
             let delay = random_delay(min_delay, max_delay);
-            tokio::select! {
-                _ = tokio::time::sleep(delay) => {}
-                _ = self.notify.notified() => {}
-            }
+            tokio::time::sleep(delay).await;
         }
         {
             let mut status = self.status.write().await;
@@ -732,12 +731,17 @@ fn first_future_due_after(future_due: &[FutureDueEntry], now: DateTime<Utc>) -> 
 async fn wait_inter_refresh_delay_state(
     notify: &Notify,
     status: &RwLock<SchedulerStatus>,
+    enabled: &AtomicBool,
+    manual_requested: &AtomicBool,
     delay_until: DateTime<Utc>,
     next_key: Option<String>,
     future_due: &[FutureDueEntry],
 ) -> Result<bool> {
     let mut next_future_index = first_future_due_after(future_due, Utc::now());
     loop {
+        if !enabled.load(Ordering::SeqCst) || manual_requested.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
         let now = Utc::now();
         if now >= delay_until {
             return Ok(false);
@@ -753,20 +757,11 @@ async fn wait_inter_refresh_delay_state(
         let sleep_duration = (sleep_until - now)
             .to_std()
             .unwrap_or_else(|_| Duration::from_secs(1));
-        let mut wake_requested = false;
         tokio::select! {
             _ = tokio::time::sleep(sleep_duration) => {}
-            _ = notify.notified() => {
-                wake_requested = true;
-            }
-        }
-        if wake_requested {
-            return Ok(true);
+            _ = notify.notified() => {}
         }
         let now = Utc::now();
-        if now >= delay_until {
-            return Ok(false);
-        }
         while next_future_index < future_due.len() && future_due[next_future_index].due_at <= now {
             next_future_index += 1;
         }
@@ -885,12 +880,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wake_interrupts_inter_refresh_delay() {
-        let temp = tempdir().unwrap();
-        let handle = SchedulerHandle::load(temp.path().join("scheduler_state.json")).unwrap();
-        let notify = handle.notify.clone();
-        let status = handle.status.clone();
-        let delay_until = Utc::now() + chrono::Duration::seconds(30);
+    async fn wake_preserves_inter_refresh_delay() {
+        let notify = Arc::new(Notify::new());
+        let worker_notify = notify.clone();
+        let delay_until = Utc::now() + chrono::Duration::milliseconds(200);
         let future_due = vec![FutureDueEntry {
             key: "future.json".to_string(),
             due_at: Utc::now() + chrono::Duration::minutes(30),
@@ -898,8 +891,10 @@ mod tests {
 
         let worker = tokio::spawn(async move {
             wait_inter_refresh_delay_state(
-                notify.as_ref(),
-                status.as_ref(),
+                worker_notify.as_ref(),
+                &RwLock::new(SchedulerStatus::default()),
+                &AtomicBool::new(true),
+                &AtomicBool::new(false),
                 delay_until,
                 Some("queued.json".to_string()),
                 future_due.as_slice(),
@@ -908,14 +903,58 @@ mod tests {
             .unwrap()
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        handle.wake();
+        // Include a notification queued before the wait starts.
+        notify.notify_one();
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            notify.notify_one();
+        }
 
-        let wake_requested = tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+        let interrupted = tokio::time::timeout(Duration::from_secs(1), worker)
             .await
             .unwrap()
             .unwrap();
-        assert!(wake_requested);
+        assert!(!interrupted);
+        assert!(Utc::now() >= delay_until);
+    }
+
+    #[tokio::test]
+    async fn control_requests_interrupt_inter_refresh_delay() {
+        for manual_request in [false, true] {
+            let notify = Arc::new(Notify::new());
+            let worker_notify = notify.clone();
+            let enabled = Arc::new(AtomicBool::new(true));
+            let worker_enabled = enabled.clone();
+            let manual_requested = Arc::new(AtomicBool::new(false));
+            let worker_manual_requested = manual_requested.clone();
+            let worker = tokio::spawn(async move {
+                wait_inter_refresh_delay_state(
+                    worker_notify.as_ref(),
+                    &RwLock::new(SchedulerStatus::default()),
+                    worker_enabled.as_ref(),
+                    worker_manual_requested.as_ref(),
+                    Utc::now() + chrono::Duration::seconds(30),
+                    None,
+                    &[],
+                )
+                .await
+                .unwrap()
+            });
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if manual_request {
+                manual_requested.store(true, Ordering::SeqCst);
+            } else {
+                enabled.store(false, Ordering::SeqCst);
+            }
+            notify.notify_one();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), worker)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            );
+        }
     }
 
     #[tokio::test]
